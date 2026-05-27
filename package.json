@@ -1,6 +1,6 @@
 {
   "name": "urlens",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Zero-allocation URL slicing — 5-73x faster than the native URL parser. Read, write, and predicate functions that compare bytes in place without allocating.",
   "keywords": [
     "url",

@@ -23,6 +23,9 @@ const PAIR_LABELS: Record<string, string> = {
   "rq.plain vs URL.plain": "read query, plain ASCII",
   "rq.encoded vs URL.encoded": "read query, percent-encoded UTF-8",
   "rq.long vs URL.long": "read query, 12 params, key near end",
+  "rq.miss vs URL.miss": "read query, key absent (miss path)",
+  "rq.decoded_key vs URL.decoded_key":
+    "read query, encoded URL key (decoded match)",
   "rqs.two vs URL.two": "read 2 keys (`readQueryParams`)",
   "rqs.four vs URL.four": "read 4 keys (`readQueryParams`)",
   "rp.full vs URL.pathname": "read pathname (full URL)",
@@ -42,6 +45,16 @@ const PAIR_LABELS: Record<string, string> = {
   "om.full vs URL.origin.eq": "`originMatches`",
   "rfrag.full vs URL.hash": "read fragment",
   "sp.port.set vs URL.port.set": "set port",
+  "view.read1 vs rp.full":
+    "`view().pathname()` vs flat `readPathname` (1 read)",
+  "view.read5 vs urlens.flat5": "`view()` 5 reads vs flat 5 reads",
+  "view.read5 vs URL.read5": "`view()` 5 reads vs `new URL()` + 5 props",
+  "view.qp1 vs rq.plain": "`view().queryParam()` vs flat `readQueryParam`",
+  "view.qp.batch vs rqs.two":
+    "`view().queryParams()` vs `readQueryParams` (2 keys)",
+  "rqp.remove1 vs sq.delete": "`removeQueryParam` vs `setQueryParam(…, null)`",
+  "rqp.removeN vs rqp.removeN.seq":
+    "`removeQueryParams` (bulk) vs N sequential",
 };
 const PAIR_ORDER = Object.keys(PAIR_LABELS);
 
@@ -75,7 +88,10 @@ function parseEngineBlock(body: string): EngineResults {
     ops[m[1]] = parseOps(m[2], m[3]);
   }
 
-  const speedRe = /^(\S+ vs \S+)\s+([\d.]+)x$/gm;
+  // Bench rows look like "name vs name   12.34x" — but very long names can
+  // butt directly against the number with no space (the bench pads to a
+  // fixed column width). Accept both.
+  const speedRe = /^(\S+ vs \S+?)\s*([\d.]+)x$/gm;
   for (const m of body.matchAll(speedRe)) {
     speedups[m[1]] = parseFloat(m[2]);
   }

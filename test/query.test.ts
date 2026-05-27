@@ -5,6 +5,8 @@ import {
   readQuery,
   readQueryParam,
   readQueryParams,
+  removeQueryParam,
+  removeQueryParams,
   setQueryParam,
   setQueryParams,
   stripQuery,
@@ -527,5 +529,249 @@ describe("stripQuery", () => {
   test("strips an empty query", () => {
     expect(stripQuery("https://x.test/p?")).toBe("https://x.test/p");
     expect(stripQuery("https://x.test/p?#frag")).toBe("https://x.test/p#frag");
+  });
+});
+
+describe("removeQueryParam", () => {
+  test("removes the key", () => {
+    expect(removeQueryParam("https://x.test/?a=1&utm=ig", "utm")).toBe(
+      "https://x.test/?a=1"
+    );
+  });
+
+  test("returns input unchanged when the key is absent", () => {
+    const u = "https://x.test/?a=1";
+    expect(removeQueryParam(u, "missing")).toBe(u);
+  });
+
+  test("returns input unchanged when there is no query", () => {
+    const u = "https://x.test/p";
+    expect(removeQueryParam(u, "any")).toBe(u);
+  });
+
+  test("strips the '?' when removing the only param", () => {
+    expect(removeQueryParam("https://x.test/?only=1", "only")).toBe(
+      "https://x.test/"
+    );
+  });
+
+  test("removes every occurrence when the key is duplicated", () => {
+    expect(removeQueryParam("https://x.test/?a=1&a=2&b=3", "a")).toBe(
+      "https://x.test/?b=3"
+    );
+  });
+
+  test("preserves the fragment", () => {
+    expect(removeQueryParam("https://x.test/?a=1#frag", "a")).toBe(
+      "https://x.test/#frag"
+    );
+  });
+});
+
+describe("removeQueryParams", () => {
+  test("removes every listed key in a single pass", () => {
+    expect(
+      removeQueryParams(
+        "https://x.test/?q=hi&utm_source=ig&utm_campaign=spring&page=2",
+        ["utm_source", "utm_campaign"]
+      )
+    ).toBe("https://x.test/?q=hi&page=2");
+  });
+
+  test("returns input unchanged when keys is empty", () => {
+    const u = "https://x.test/?a=1";
+    expect(removeQueryParams(u, [])).toBe(u);
+  });
+
+  test("returns input unchanged when there is no query", () => {
+    const u = "https://x.test/p";
+    expect(removeQueryParams(u, ["a", "b"])).toBe(u);
+  });
+
+  test("strips the '?' when every param is removed", () => {
+    expect(removeQueryParams("https://x.test/?a=1&b=2", ["a", "b"])).toBe(
+      "https://x.test/"
+    );
+  });
+
+  test("removes every duplicate occurrence of a listed key", () => {
+    expect(removeQueryParams("https://x.test/?a=1&a=2&b=3&a=4", ["a"])).toBe(
+      "https://x.test/?b=3"
+    );
+  });
+
+  test("preserves the fragment", () => {
+    expect(removeQueryParams("https://x.test/?a=1&b=2#frag", ["a"])).toBe(
+      "https://x.test/?b=2#frag"
+    );
+  });
+
+  test("does not match keys that are prefixes of other params", () => {
+    expect(removeQueryParams("https://x.test/?abc=1&ab=2", ["ab"])).toBe(
+      "https://x.test/?abc=1"
+    );
+  });
+
+  test("matches decoded URL key against plain user key (WHATWG)", () => {
+    // URL "a+b" decodes to "a b" — matches user key "a b".
+    expect(removeQueryParams("https://x.test/?a+b=1&c=2", ["a b"])).toBe(
+      "https://x.test/?c=2"
+    );
+    // URL "a%2Bb" decodes to "a+b" — matches user key "a+b" (ambiguous).
+    expect(removeQueryParams("https://x.test/?a%2Bb=1&c=2", ["a+b"])).toBe(
+      "https://x.test/?c=2"
+    );
+  });
+});
+
+describe("WHATWG-decoded key matching", () => {
+  describe("readQueryParam — decoded keys", () => {
+    test("matches percent-encoded URL key against plain user key", () => {
+      expect(readQueryParam("https://x.test/?weird%20key=v", "weird key")).toBe(
+        "v"
+      );
+    });
+
+    test("matches '+' URL key against space user key", () => {
+      expect(readQueryParam("https://x.test/?a+b=v", "a b")).toBe("v");
+    });
+
+    test("matches UTF-8 encoded URL key", () => {
+      expect(readQueryParam("https://x.test/?caf%C3%A9=v", "café")).toBe("v");
+    });
+
+    test("matches astral codepoint URL key", () => {
+      // 🌟 = U+1F31F = %F0%9F%8C%9F
+      expect(readQueryParam("https://x.test/?%F0%9F%8C%9F=v", "🌟")).toBe("v");
+    });
+
+    test("still returns null when no encoding can rescue a miss", () => {
+      expect(readQueryParam("https://x.test/?foo=v", "bar")).toBeNull();
+    });
+
+    test("rejects ambiguous-user-key false positives (WHATWG semantics)", () => {
+      // User key has literal '%20'. URL key bytes match but decode to "a b".
+      // WHATWG would NOT consider this a match — and neither should we.
+      expect(readQueryParam("https://x.test/?a%20b=v", "a%20b")).toBeNull();
+      expect(readQueryParam("https://x.test/?a+b=v", "a+b")).toBeNull();
+    });
+
+    test("matches when URL is double-encoded to user's encoded key", () => {
+      // URL "a%2520b" decodes to "a%20b" — match for user key "a%20b".
+      expect(readQueryParam("https://x.test/?a%2520b=v", "a%20b")).toBe("v");
+    });
+  });
+
+  describe("readQueryParams — decoded keys", () => {
+    test("mixed batch of byte-strict and decoded keys", () => {
+      expect(
+        readQueryParams("https://x.test/?caf%C3%A9=fr&q=hi&weird+key=ok", [
+          "q",
+          "café",
+          "weird key",
+          "missing",
+        ])
+      ).toEqual(["hi", "fr", "ok", null]);
+    });
+  });
+
+  describe("hasQueryParam — decoded keys", () => {
+    test("returns true for percent-encoded URL key + plain user key", () => {
+      expect(hasQueryParam("https://x.test/?weird%20key=v", "weird key")).toBe(
+        true
+      );
+    });
+    test("returns true for '+' URL key + space user key", () => {
+      expect(hasQueryParam("https://x.test/?a+b=v", "a b")).toBe(true);
+    });
+    test("returns false for ambiguous-user-key false positive", () => {
+      expect(hasQueryParam("https://x.test/?a%20b=v", "a%20b")).toBe(false);
+    });
+  });
+
+  describe("queryParamEquals — decoded keys", () => {
+    test("matches encoded key + checks value WHATWG-style", () => {
+      expect(
+        queryParamEquals("https://x.test/?weird%20key=hi", "weird key", "hi")
+      ).toBe(true);
+      expect(
+        queryParamEquals(
+          "https://x.test/?weird%20key=hi+world",
+          "weird key",
+          "hi world"
+        )
+      ).toBe(true);
+    });
+  });
+
+  describe("setQueryParam — decoded keys", () => {
+    test("replaces an encoded key (preserving URL's original encoding)", () => {
+      // The URL author chose to encode the key as %20; we keep that and just
+      // swap the value. Output: URL prefix + reformatted "key=value" pair.
+      // Our setter writes `key` literally as given by the caller, so the
+      // result uses the caller's representation ("weird key" with literal space).
+      // This is WHATWG-correct serialization for a fresh URLSearchParams.
+      expect(
+        setQueryParam("https://x.test/?weird%20key=old", "weird key", "new")
+      ).toBe("https://x.test/?weird+key=new");
+    });
+
+    test("removes encoded-key duplicates on replace", () => {
+      // First match (either byte-equal or decoded) gets replaced; the rest
+      // are dropped.
+      expect(
+        setQueryParam(
+          "https://x.test/?weird%20key=a&weird+key=b&q=keep",
+          "weird key",
+          "z"
+        )
+      ).toBe("https://x.test/?weird+key=z&q=keep");
+    });
+
+    test("does not match ambiguous user key against literal byte form", () => {
+      // User key has literal '%20' (3 chars: %, 2, 0). URL byte-equal but
+      // decodes differently ("a%20b" decodes to "a b" ≠ "a%20b"). We must
+      // NOT replace; we append, and the appended key is WHATWG-serialized
+      // ("a%20b" → "a%2520b" because '%' gets percent-encoded as %25).
+      expect(setQueryParam("https://x.test/?a%20b=old", "a%20b", "new")).toBe(
+        "https://x.test/?a%20b=old&a%2520b=new"
+      );
+    });
+  });
+
+  describe("setQueryParams — decoded keys", () => {
+    test("bulk replacement crossing encoded and byte keys", () => {
+      // Replacement reuses the user key encoded via WHATWG rules
+      // (café → caf%C3%A9), matching what URLSearchParams.toString() emits.
+      expect(
+        setQueryParams("https://x.test/?caf%C3%A9=fr&q=old", {
+          café: "FR",
+          q: "new",
+        })
+      ).toBe("https://x.test/?caf%C3%A9=FR&q=new");
+    });
+  });
+
+  describe("cross-consistency vs URLSearchParams.get", () => {
+    const fixtures: Array<[string, string]> = [
+      ["https://x.test/?weird%20key=v", "weird key"],
+      ["https://x.test/?a+b=value", "a b"],
+      ["https://x.test/?caf%C3%A9=hi", "café"],
+      ["https://x.test/?%F0%9F%8C%9F=star", "🌟"],
+      ["https://x.test/?plain=ok", "plain"],
+      ["https://x.test/?plain=ok", "missing"],
+      // Ambiguous-user-key edge cases
+      ["https://x.test/?a%20b=v", "a%20b"], // null (decoded URL key is "a b")
+      ["https://x.test/?a+b=v", "a+b"], // null
+      ["https://x.test/?a%2520b=v", "a%20b"], // "v" (URL decodes to "a%20b")
+    ];
+
+    for (const [u, k] of fixtures) {
+      test(`${u} + "${k}" matches URLSearchParams.get`, () => {
+        const ours = readQueryParam(u, k);
+        const native = new URL(u).searchParams.get(k);
+        expect(ours).toBe(native);
+      });
+    }
   });
 });

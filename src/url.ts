@@ -1,26 +1,31 @@
-const CH_SLASH = 47;
-const CH_QUESTION = 63;
-const CH_HASH = 35;
-const CH_COLON = 58;
-const CH_OPEN_BRACKET = 91;
-const CH_0 = 48;
-const CH_9 = 57;
+import {
+  CH_0,
+  CH_9,
+  CH_COLON,
+  CH_OPEN_BRACKET,
+  CH_SLASH,
+  defaultPortFor,
+  findAuthorityEnd,
+  parsePortRange,
+} from "./internal.js";
 
-// Returns the index of the first '/', '?', or '#' at or after `start`, or the
-// string length if none are present. Used to locate the end of the authority
-// section in URLs that have a scheme. One linear pass — faster than three
-// separate indexOf calls when the authority is short, and never worse.
-function findAuthorityEnd(rawUrl: string, start: number): number {
-  const len = rawUrl.length;
-  for (let i = start; i < len; i++) {
-    const c = rawUrl.charCodeAt(i);
-    if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
-      return i;
-    }
-  }
-  return len;
-}
-
+/**
+ * Returns the pathname portion of a URL.
+ *
+ * For a full URL, returns the substring between the authority and the first
+ * `?` or `#` (e.g. `/api/v1/users/42`). For pathname-only inputs (request-line
+ * shapes like `/api/v1/users`), the input is treated as a path and returned as
+ * the literal substring up to any `?`/`#`. For URLs with no path at all
+ * (`https://example.com`), returns `"/"`.
+ *
+ * Zero-copy: the returned string is a sliced-string view into the input on
+ * V8/SpiderMonkey/JSC; only the small string header is allocated.
+ *
+ * @example
+ *   readPathname("https://example.com/api/v1?x=1#frag"); // → "/api/v1"
+ *   readPathname("/api/v1/users");                       // → "/api/v1/users"
+ *   readPathname("https://example.com");                 // → "/"
+ */
 export function readPathname(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   let start: number;
@@ -50,6 +55,16 @@ export function readPathname(rawUrl: string): string {
   return end === start ? "/" : rawUrl.substring(start, end);
 }
 
+/**
+ * Returns the origin (`scheme://host[:port]`) of a URL.
+ *
+ * Strips userinfo (`user:pass@`). IPv6-aware: bracketed hosts (`[::1]`) are
+ * preserved with their brackets. Returns `""` when the input has no scheme.
+ *
+ * @example
+ *   readOrigin("https://user:pass@example.com:8080/api?x=1");
+ *   // → "https://example.com:8080"
+ */
 export function readOrigin(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -76,21 +91,36 @@ export function readOrigin(rawUrl: string): string {
   );
 }
 
-// Returns the scheme without the trailing ':' (e.g. "https"). Returns "" for
-// inputs with no scheme.
+/**
+ * Returns the scheme without the trailing `:` (e.g. `"https"`).
+ *
+ * Differs from `URL.protocol`, which includes the trailing `:`. Returns `""`
+ * for inputs with no scheme.
+ *
+ * @example
+ *   readScheme("https://example.com"); // → "https"
+ *   readScheme("/relative/path");      // → ""
+ */
 export function readScheme(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   return schemePos === -1 ? "" : rawUrl.substring(0, schemePos);
 }
 
-// Returns the host in canonical authority form ("example.com:8080",
-// "[::1]:8080", or just "example.com" when no port is present). Returns "" if
-// the input has no scheme.
-//
-// All three host readers (readHost/readHostname/readPort) duplicate the
-// authority-locating scan. Sharing it via a helper would allocate the
-// returned tuple object on every call; inlining keeps each function
-// allocation-free and lets the JIT specialize separately.
+/**
+ * Returns the host in canonical authority form: `hostname:port` if a port is
+ * present, or just `hostname` otherwise. IPv6 brackets are preserved
+ * (`[::1]:8080`). Userinfo is stripped. Returns `""` if the input has no scheme.
+ *
+ * Note: each host reader (`readHost` / `readHostname` / `readPort`) duplicates
+ * the authority-locating scan deliberately — sharing the scan via a helper
+ * would allocate a returned tuple per call. For batched reads on one URL,
+ * prefer {@link view}, which scans once and caches all offsets.
+ *
+ * @example
+ *   readHost("https://example.com:8080/p");      // → "example.com:8080"
+ *   readHost("https://user@example.com/p");      // → "example.com"
+ *   readHost("https://[::1]:8080/");             // → "[::1]:8080"
+ */
 export function readHost(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -103,8 +133,15 @@ export function readHost(rawUrl: string): string {
   return rawUrl.substring(hostStart, authorityEnd);
 }
 
-// Returns the bare hostname with IPv6 brackets stripped ("example.com",
-// "::1"). Returns "" if the input has no scheme.
+/**
+ * Returns the bare hostname with IPv6 brackets stripped.
+ *
+ * Returns `""` if the input has no scheme.
+ *
+ * @example
+ *   readHostname("https://example.com:8080/p");  // → "example.com"
+ *   readHostname("http://[::1]:8080/");          // → "::1"
+ */
 export function readHostname(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -129,9 +166,18 @@ export function readHostname(rawUrl: string): string {
   return rawUrl.substring(hostStart, hostEnd);
 }
 
-// Returns the port as a number, or null if no explicit port is present or the
-// port is malformed (non-digit content). Implicit ports (the URL spec maps
-// "https" → 443) are intentionally NOT inferred — that's a different feature.
+/**
+ * Returns the explicit port as a number, or `null` if no port is present or
+ * the port is malformed (non-digit content).
+ *
+ * Implicit ports (the URL spec maps `https` → 443) are intentionally NOT
+ * inferred — see {@link originMatches} for a comparison that does.
+ *
+ * @example
+ *   readPort("http://example.com:8080/"); // → 8080
+ *   readPort("http://example.com/");      // → null (no explicit port)
+ *   readPort("http://example.com:abc/");  // → null (malformed)
+ */
 export function readPort(rawUrl: string): number | null {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -180,11 +226,18 @@ export function readPort(rawUrl: string): number | null {
   return port;
 }
 
-// Zero-allocation predicate: returns true if `rawUrl` uses `scheme`. Schemes
-// are compared case-insensitively (URL schemes are case-insensitive by RFC,
-// and WHATWG normalizes them to lowercase). The `| 32` ASCII-lowercase trick
-// is exact for the valid scheme alphabet (letters get lowercased; digits,
-// '+', '-', '.' are unaffected).
+/**
+ * Zero-allocation predicate: returns `true` if `rawUrl` uses `scheme`.
+ *
+ * Comparison is case-insensitive (URL schemes are case-insensitive per RFC,
+ * and WHATWG normalizes them to lowercase). The `| 32` ASCII-lowercase trick
+ * is exact for the valid scheme alphabet (letters lowercase; digits, `+`,
+ * `-`, `.` are unaffected).
+ *
+ * @example
+ *   hasScheme("HTTPS://x/", "https");   // → true
+ *   hasScheme("ws://x/", "wss");        // → false
+ */
 export function hasScheme(rawUrl: string, scheme: string): boolean {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos !== scheme.length) {
@@ -198,9 +251,17 @@ export function hasScheme(rawUrl: string, scheme: string): boolean {
   return true;
 }
 
-// Zero-allocation predicate: returns true if the pathname starts with
-// `prefix`. For origin-only URLs ("https://example.com"), the implicit
-// pathname "/" is matched against prefixes "" and "/".
+/**
+ * Zero-allocation predicate: returns `true` if the pathname starts with
+ * `prefix`.
+ *
+ * For origin-only URLs (`https://example.com`), the implicit pathname `"/"` is
+ * matched against the prefixes `""` and `"/"`.
+ *
+ * @example
+ *   pathnameStartsWith("https://x/api/v1/users", "/api"); // → true
+ *   pathnameStartsWith("https://x", "/");                 // → true
+ */
 export function pathnameStartsWith(rawUrl: string, prefix: string): boolean {
   const schemePos = rawUrl.indexOf("://");
   let pathStart: number;
@@ -233,8 +294,13 @@ export function pathnameStartsWith(rawUrl: string, prefix: string): boolean {
   return rawUrl.startsWith(prefix, pathStart);
 }
 
-// Zero-allocation predicate: returns true if the pathname ends with
-// `suffix`. Like `pathnameStartsWith`, treats an absent path as "/".
+/**
+ * Zero-allocation predicate: returns `true` if the pathname ends with
+ * `suffix`. Like {@link pathnameStartsWith}, treats an absent path as `"/"`.
+ *
+ * @example
+ *   pathnameEndsWith("https://x/page.html", ".html"); // → true
+ */
 export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
   const schemePos = rawUrl.indexOf("://");
   let pathStart: number;
@@ -268,90 +334,21 @@ export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
   return rawUrl.startsWith(suffix, pathEnd - suffix.length);
 }
 
-// Returns the WHATWG default port for a "special" scheme: http=80,
-// https=443, ws=80, wss=443, ftp=21. Returns -1 for any other scheme.
-// Case-insensitive ASCII byte compare; no allocation.
-function defaultPortFor(rawUrl: string, schemeEnd: number): number {
-  if (schemeEnd === 5) {
-    if (
-      (rawUrl.charCodeAt(0) | 32) === 104 /* h */ &&
-      (rawUrl.charCodeAt(1) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(2) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(3) | 32) === 112 /* p */ &&
-      (rawUrl.charCodeAt(4) | 32) === 115 /* s */
-    ) {
-      return 443;
-    }
-    return -1;
-  }
-  if (schemeEnd === 4) {
-    if (
-      (rawUrl.charCodeAt(0) | 32) === 104 /* h */ &&
-      (rawUrl.charCodeAt(1) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(2) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(3) | 32) === 112 /* p */
-    ) {
-      return 80;
-    }
-    return -1;
-  }
-  if (schemeEnd === 3) {
-    const c0 = rawUrl.charCodeAt(0) | 32;
-    if (
-      c0 === 102 /* f */ &&
-      (rawUrl.charCodeAt(1) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(2) | 32) === 112 /* p */
-    ) {
-      return 21; // ftp
-    }
-    if (
-      c0 === 119 /* w */ &&
-      (rawUrl.charCodeAt(1) | 32) === 115 /* s */ &&
-      (rawUrl.charCodeAt(2) | 32) === 115 /* s */
-    ) {
-      return 443; // wss
-    }
-    return -1;
-  }
-  if (schemeEnd === 2) {
-    if (
-      (rawUrl.charCodeAt(0) | 32) === 119 /* w */ &&
-      (rawUrl.charCodeAt(1) | 32) === 115 /* s */
-    ) {
-      return 80; // ws
-    }
-    return -1;
-  }
-  return -1;
-}
-
-// Parses ASCII digits in `[start, end)` as a decimal integer. Returns -1 on
-// empty range or any non-digit content. No allocation.
-function parsePortRange(s: string, start: number, end: number): number {
-  if (start >= end) {
-    return -1;
-  }
-  let port = 0;
-  for (let i = start; i < end; i++) {
-    const c = s.charCodeAt(i);
-    if (c < CH_0 || c > CH_9) {
-      return -1;
-    }
-    port = port * 10 + (c - CH_0);
-  }
-  return port;
-}
-
-// Zero-allocation origin equality. Scheme + hostname + port, userinfo
-// stripped, IPv6 aware. Implicit ports are inferred for "special" schemes —
-// `originMatches("https://x/", "https://x:443/")` is true because 443 is
-// the implicit port for https. Schemes and hostnames compare
-// case-insensitively (DNS hostnames and URL schemes are both case-insensitive
-// per spec).
-//
-// For non-special schemes (anything other than http/https/ws/wss/ftp) there
-// is no implicit port: `originMatches("custom://x/", "custom://x:9/")` is
-// false unless both sides have the same explicit port.
+/**
+ * Zero-allocation origin equality: scheme + hostname + port, userinfo
+ * stripped, IPv6 aware.
+ *
+ * Implicit ports are inferred for "special" schemes (`http`=80, `https`=443,
+ * `ws`=80, `wss`=443, `ftp`=21), so `originMatches("https://x/", "https://x:443/")`
+ * is `true`. Scheme and hostname compare case-insensitively (both are
+ * case-insensitive per spec). For non-special schemes (e.g. `custom://`),
+ * there is no implicit port — both sides must have the same explicit port
+ * (or both lack one).
+ *
+ * @example
+ *   originMatches("https://EXAMPLE.com/x", "https://example.com:443/y"); // → true
+ *   originMatches("https://a.test/", "https://b.test/");                 // → false
+ */
 export function originMatches(a: string, b: string): boolean {
   const aS = a.indexOf("://");
   const bS = b.indexOf("://");
@@ -479,20 +476,42 @@ export function originMatches(a: string, b: string): boolean {
   return aPort === bPort;
 }
 
-// Returns the fragment without the leading '#', or "" if absent.
+/**
+ * Returns the fragment without the leading `#`, or `""` if absent.
+ *
+ * Differs from `URL.hash`, which keeps the leading `#`.
+ *
+ * @example
+ *   readFragment("https://x/p#section-2"); // → "section-2"
+ *   readFragment("https://x/p");           // → ""
+ */
 export function readFragment(rawUrl: string): string {
   const hPos = rawUrl.indexOf("#");
   return hPos === -1 ? "" : rawUrl.substring(hPos + 1);
 }
 
-// Returns `rawUrl` with the fragment removed. Returns the input unchanged
-// when there is no fragment.
+/**
+ * Returns `rawUrl` with the fragment removed. Returns the input unchanged
+ * when there is no fragment.
+ *
+ * @example
+ *   stripFragment("https://x/p?q=1#frag"); // → "https://x/p?q=1"
+ */
 export function stripFragment(rawUrl: string): string {
   const hPos = rawUrl.indexOf("#");
   return hPos === -1 ? rawUrl : rawUrl.substring(0, hPos);
 }
 
-// Replaces the scheme. If `rawUrl` has no scheme, returns it unchanged.
+/**
+ * Replaces the scheme of `rawUrl` with `scheme`.
+ *
+ * No-op when `rawUrl` has no scheme — this function does not synthesize a
+ * scheme. Pass a fully-qualified URL or build one with string concat first.
+ *
+ * @example
+ *   setScheme("http://example.com/", "https");  // → "https://example.com/"
+ *   setScheme("/path", "https");                // → "/path" (no-op)
+ */
 export function setScheme(rawUrl: string, scheme: string): string {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -501,9 +520,19 @@ export function setScheme(rawUrl: string, scheme: string): string {
   return scheme + rawUrl.substring(schemePos);
 }
 
-// Replaces the port. `null` removes any explicit port. Throws RangeError for
-// non-integer or out-of-range ports. Returns the input unchanged when there
-// is no scheme to attach the port to.
+/**
+ * Replaces the port of `rawUrl` with `port`. Passing `null` removes any
+ * explicit port (and its colon). Preserves userinfo, IPv6 brackets, path,
+ * query, and fragment.
+ *
+ * Throws `RangeError` for non-integer or out-of-range ports. No-op when
+ * `rawUrl` has no scheme — pass a fully-qualified URL.
+ *
+ * @example
+ *   setPort("https://x:80/api", 8443);  // → "https://x:8443/api"
+ *   setPort("https://x:80/api", null);  // → "https://x/api"
+ *   setPort("/api", 8080);              // → "/api" (no-op)
+ */
 export function setPort(rawUrl: string, port: number | null): string {
   if (port !== null) {
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -565,8 +594,18 @@ export function setPort(rawUrl: string, port: number | null): string {
   );
 }
 
-// Replaces the pathname of `rawUrl` with `newPathname`. Preserves the query
-// and fragment, if present. Normalizes `newPathname` to start with "/".
+/**
+ * Replaces the pathname of `rawUrl` with `newPathname`. Preserves the query
+ * and fragment, if present. Normalizes `newPathname` to start with `/` if it
+ * does not already.
+ *
+ * Does NOT collapse `..` or `.` segments — pass the path you want written
+ * verbatim.
+ *
+ * @example
+ *   setPathname("https://x/old?q=1#frag", "/new");
+ *   // → "https://x/new?q=1#frag"
+ */
 export function setPathname(rawUrl: string, newPathname: string): string {
   const normalized =
     newPathname.length === 0 || newPathname.charCodeAt(0) !== CH_SLASH

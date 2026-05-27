@@ -131,7 +131,6 @@ function locate(rawUrl) {
   }
   var hPos = rawUrl.indexOf("#");
   if (hPos !== -1 && hPos < qPos) {
-    // '?' is inside a fragment — treat as no query.
     LOC_Q = -1;
     LOC_F = hPos;
     return;
@@ -140,12 +139,57 @@ function locate(rawUrl) {
   LOC_F = hPos === -1 ? rawUrl.length : hPos;
 }
 
+function queryHasEncoding(rawUrl, start, end) {
+  var pct = rawUrl.indexOf("%", start);
+  if (pct !== -1 && pct < end) return true;
+  var plus = rawUrl.indexOf("+", start);
+  return plus !== -1 && plus < end;
+}
+
+function keyIsAmbiguous(key) {
+  return key.indexOf("%") !== -1 || key.indexOf("+") !== -1;
+}
+
+// Combined-scan setter key analyzer — single pass produces both the encoded
+// form and the ambiguity flag, written to module-level scratch.
+var KEY_ENCODED = "";
+var KEY_AMBIG = false;
+var SAFE_KEY = new Uint8Array(128);
+(function initSafeKey() {
+  for (var sc = 48; sc <= 57; sc++) SAFE_KEY[sc] = 1;
+  for (var sc2 = 65; sc2 <= 90; sc2++) SAFE_KEY[sc2] = 1;
+  for (var sc3 = 97; sc3 <= 122; sc3++) SAFE_KEY[sc3] = 1;
+  SAFE_KEY[42] = 1;
+  SAFE_KEY[45] = 1;
+  SAFE_KEY[46] = 1;
+  SAFE_KEY[95] = 1;
+})();
+
+function analyzeSetterKey(key) {
+  var len = key.length;
+  var allSafe = true;
+  var hasAmbig = false;
+  for (var p = 0; p < len; p++) {
+    var c = key.charCodeAt(p);
+    if (c === CH_PERCENT || c === CH_PLUS) {
+      hasAmbig = true;
+      allSafe = false;
+    } else if (c >= 128 || SAFE_KEY[c] !== 1) {
+      allSafe = false;
+    }
+  }
+  KEY_AMBIG = hasAmbig;
+  KEY_ENCODED = allSafe ? key : encodeQueryComponent(key);
+}
+
 function readQueryParam(rawUrl, key) {
   locate(rawUrl);
   var qPos = LOC_Q;
   if (qPos === -1) return null;
   var end = LOC_F;
   var keyLen = key.length;
+  var userAmbig = keyIsAmbiguous(key);
+  // Pass 1: byte-strict.
   var i = qPos + 1;
   while (i < end) {
     var amp = rawUrl.indexOf("&", i);
@@ -153,10 +197,26 @@ function readQueryParam(rawUrl, key) {
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
     if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
-      if (eq === -1 || eq > amp) return "";
-      return decodeRange(rawUrl, eq + 1, amp);
+      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) {
+        if (eq === -1 || eq > amp) return "";
+        return decodeRange(rawUrl, eq + 1, amp);
+      }
     }
     i = amp + 1;
+  }
+  // Pass 2: WHATWG-decoded fallback (only if URL has encoding).
+  if (!queryHasEncoding(rawUrl, qPos + 1, end)) return null;
+  i = qPos + 1;
+  while (i < end) {
+    var amp2 = rawUrl.indexOf("&", i);
+    if (amp2 === -1 || amp2 > end) amp2 = end;
+    var eq2 = rawUrl.indexOf("=", i);
+    var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+    if (keyEnd2 - i >= keyLen && valueEquals(rawUrl, i, keyEnd2, key)) {
+      if (eq2 === -1 || eq2 > amp2) return "";
+      return decodeRange(rawUrl, eq2 + 1, amp2);
+    }
+    i = amp2 + 1;
   }
   return null;
 }
@@ -168,10 +228,12 @@ function readQueryParams(rawUrl, keys) {
 
   var firstChars = new Array(n);
   var keyLens = new Array(n);
+  var keyAmbig = new Array(n);
   for (var z = 0; z < n; z++) {
     out[z] = null;
     firstChars[z] = keys[z].charCodeAt(0);
     keyLens[z] = keys[z].length;
+    keyAmbig[z] = keyIsAmbiguous(keys[z]);
   }
 
   locate(rawUrl);
@@ -179,6 +241,7 @@ function readQueryParams(rawUrl, keys) {
   if (qPos === -1) return out;
   var end = LOC_F;
 
+  // Pass 1: byte-strict.
   var remaining = n;
   var i = qPos + 1;
   while (i < end && remaining > 0) {
@@ -193,12 +256,36 @@ function readQueryParams(rawUrl, keys) {
       if (out[k] !== null) continue;
       if (keyLens[k] !== fieldLen || firstChars[k] !== fc) continue;
       if (rawUrl.startsWith(keys[k], i)) {
-        out[k] =
-          eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
-        remaining--;
+        if (!keyAmbig[k] || valueEquals(rawUrl, i, keyEnd, keys[k])) {
+          out[k] =
+            eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          remaining--;
+        }
       }
     }
     i = amp + 1;
+  }
+
+  // Pass 2: WHATWG-decoded fallback.
+  if (remaining > 0 && queryHasEncoding(rawUrl, qPos + 1, end)) {
+    var j = qPos + 1;
+    while (j < end && remaining > 0) {
+      var amp2 = rawUrl.indexOf("&", j);
+      if (amp2 === -1 || amp2 > end) amp2 = end;
+      var eq2 = rawUrl.indexOf("=", j);
+      var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+      var fieldLen2 = keyEnd2 - j;
+      for (var k2 = 0; k2 < n; k2++) {
+        if (out[k2] !== null) continue;
+        if (fieldLen2 < keyLens[k2]) continue;
+        if (valueEquals(rawUrl, j, keyEnd2, keys[k2])) {
+          out[k2] =
+            eq2 === -1 || eq2 > amp2 ? "" : decodeRange(rawUrl, eq2 + 1, amp2);
+          remaining--;
+        }
+      }
+      j = amp2 + 1;
+    }
   }
   return out;
 }
@@ -323,80 +410,78 @@ function readPort(rawUrl) {
   return port;
 }
 
-var CH_BANG = 0x21;
-var CH_QUOTE = 0x27;
-var CH_LPAREN = 0x28;
-var CH_RPAREN = 0x29;
-var CH_TILDE = 0x7e;
-var CH_2 = 0x32;
-var CH_0CHAR = 0x30;
+// Hand-rolled WHATWG form-urlencoded encoder — no encodeURIComponent. Single
+// pass; UTF-16 → UTF-8 transcoded inline; precomputed PCT_HEX[byte] lookup.
+var SAFE = new Uint8Array(128);
+(function initSafe() {
+  for (var sc = 48; sc <= 57; sc++) SAFE[sc] = 1;
+  for (var sc2 = 65; sc2 <= 90; sc2++) SAFE[sc2] = 1;
+  for (var sc3 = 97; sc3 <= 122; sc3++) SAFE[sc3] = 1;
+  SAFE[42] = 1;
+  SAFE[45] = 1;
+  SAFE[46] = 1;
+  SAFE[95] = 1;
+})();
+var PCT_HEX = new Array(256);
+(function initPctHex() {
+  var HEX = "0123456789ABCDEF";
+  for (var b = 0; b < 256; b++) {
+    PCT_HEX[b] = "%" + HEX[(b >> 4) & 0xf] + HEX[b & 0xf];
+  }
+})();
+var PCT_FFFD = PCT_HEX[0xef] + PCT_HEX[0xbf] + PCT_HEX[0xbd];
 
 function encodeQueryComponent(value) {
-  var valueLen = value.length;
-  if (valueLen === 0) return value;
-  // F1: WHATWG safe-set fast path. If every byte is alphanumeric or one of
-  // - . _ * we return the input verbatim — no native call, no allocation.
-  var allSafe = true;
-  for (var p = 0; p < valueLen; p++) {
-    var cs = value.charCodeAt(p);
-    if (cs >= 97 && cs <= 122) continue; // a-z
-    if (cs >= 65 && cs <= 90) continue; // A-Z
-    if (cs >= 48 && cs <= 57) continue; // 0-9
-    if (cs === 45 || cs === 46 || cs === 95 || cs === 42) continue; // - . _ *
-    allSafe = false;
-    break;
-  }
-  if (allSafe) return value;
-  var initial = encodeURIComponent(value);
+  var len = value.length;
+  if (len === 0) return value;
   var out = "";
   var runStart = 0;
   var i = 0;
-  var len = initial.length;
   while (i < len) {
-    var c = initial.charCodeAt(i);
-    if (c === CH_PERCENT) {
-      if (
-        i + 2 < len &&
-        initial.charCodeAt(i + 1) === CH_2 &&
-        initial.charCodeAt(i + 2) === CH_0CHAR
-      ) {
-        out += initial.substring(runStart, i);
-        out += "+";
-        i += 3;
-        runStart = i;
-      } else {
-        i += 3;
-      }
+    var c = value.charCodeAt(i);
+    if (c < 128 && SAFE[c] === 1) {
+      i++;
       continue;
     }
-    var replacement;
-    switch (c) {
-      case CH_BANG:
-        replacement = "%21";
-        break;
-      case CH_QUOTE:
-        replacement = "%27";
-        break;
-      case CH_LPAREN:
-        replacement = "%28";
-        break;
-      case CH_RPAREN:
-        replacement = "%29";
-        break;
-      case CH_TILDE:
-        replacement = "%7E";
-        break;
-      default:
+    if (i > runStart) out += value.substring(runStart, i);
+    if (c === 32) {
+      out += "+";
+      i++;
+    } else if (c < 128) {
+      out += PCT_HEX[c];
+      i++;
+    } else if (c < 0x800) {
+      out += PCT_HEX[0xc0 | (c >> 6)] + PCT_HEX[0x80 | (c & 0x3f)];
+      i++;
+    } else if (c < 0xd800 || c >= 0xe000) {
+      out +=
+        PCT_HEX[0xe0 | (c >> 12)] +
+        PCT_HEX[0x80 | ((c >> 6) & 0x3f)] +
+        PCT_HEX[0x80 | (c & 0x3f)];
+      i++;
+    } else if (c < 0xdc00 && i + 1 < len) {
+      var c2 = value.charCodeAt(i + 1);
+      if (c2 >= 0xdc00 && c2 < 0xe000) {
+        var cp = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+        out +=
+          PCT_HEX[0xf0 | (cp >> 18)] +
+          PCT_HEX[0x80 | ((cp >> 12) & 0x3f)] +
+          PCT_HEX[0x80 | ((cp >> 6) & 0x3f)] +
+          PCT_HEX[0x80 | (cp & 0x3f)];
+        i += 2;
+      } else {
+        out += PCT_FFFD;
         i++;
-        continue;
+      }
+    } else {
+      out += PCT_FFFD;
+      i++;
     }
-    out += initial.substring(runStart, i);
-    out += replacement;
-    i++;
     runStart = i;
   }
-  if (runStart === 0) return initial;
-  return out + initial.substring(runStart);
+  if (runStart === 0) return value;
+  if (runStart < len) out += value.substring(runStart);
+  return out;
 }
 
 function setQueryParam(rawUrl, key, value) {
@@ -404,13 +489,16 @@ function setQueryParam(rawUrl, key, value) {
   var qPos = LOC_Q;
   var fragmentStart = LOC_F;
   var encoded = value === null ? null : encodeQueryComponent(value);
+  analyzeSetterKey(key);
+  var encodedKey = KEY_ENCODED;
+  var userAmbig = KEY_AMBIG;
 
   if (qPos === -1) {
     if (value === null) return rawUrl;
     return (
       rawUrl.substring(0, fragmentStart) +
       "?" +
-      key +
+      encodedKey +
       "=" +
       encoded +
       rawUrl.substring(fragmentStart)
@@ -420,6 +508,7 @@ function setQueryParam(rawUrl, key, value) {
   var queryStart = qPos + 1;
   var queryEnd = fragmentStart;
   var keyLen = key.length;
+  var queryEncodingState = -1;
   var newQuery = "";
   var replaced = false;
   var i = queryStart;
@@ -428,11 +517,33 @@ function setQueryParam(rawUrl, key, value) {
     if (amp === -1 || amp > queryEnd) amp = queryEnd;
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    var isMatch = keyEnd - i === keyLen && rawUrl.startsWith(key, i);
+    var fieldLen = keyEnd - i;
+    var isMatch = fieldLen === keyLen && rawUrl.startsWith(key, i);
+    if (isMatch && userAmbig && !valueEquals(rawUrl, i, keyEnd, key)) {
+      isMatch = false;
+    }
+    if (!isMatch && fieldLen >= keyLen) {
+      if (queryEncodingState === -1) {
+        queryEncodingState = queryHasEncoding(rawUrl, queryStart, queryEnd)
+          ? 1
+          : 0;
+      }
+      if (queryEncodingState === 1) {
+        var fieldEnc = false;
+        for (var p = i; p < keyEnd; p++) {
+          var c = rawUrl.charCodeAt(p);
+          if (c === CH_PERCENT || c === CH_PLUS) {
+            fieldEnc = true;
+            break;
+          }
+        }
+        if (fieldEnc && valueEquals(rawUrl, i, keyEnd, key)) isMatch = true;
+      }
+    }
     if (isMatch) {
       if (!replaced && encoded !== null) {
         if (newQuery.length > 0) newQuery += "&";
-        newQuery += key + "=" + encoded;
+        newQuery += encodedKey + "=" + encoded;
         replaced = true;
       }
     } else {
@@ -443,7 +554,7 @@ function setQueryParam(rawUrl, key, value) {
   }
   if (!replaced && encoded !== null) {
     if (newQuery.length > 0) newQuery += "&";
-    newQuery += key + "=" + encoded;
+    newQuery += encodedKey + "=" + encoded;
   }
   var prefix = rawUrl.substring(0, qPos);
   var suffix = rawUrl.substring(queryEnd);
@@ -741,14 +852,29 @@ function hasQueryParam(rawUrl, key) {
   if (hPos !== -1 && hPos < qPos) return false;
   var fragmentStart = hPos === -1 ? rawUrl.length : hPos;
   var keyLen = key.length;
+  var userAmbig = keyIsAmbiguous(key);
   var i = qPos + 1;
   while (i < fragmentStart) {
     var amp = rawUrl.indexOf("&", i);
     if (amp === -1 || amp > fragmentStart) amp = fragmentStart;
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) return true;
+    if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
+      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) return true;
+    }
     i = amp + 1;
+  }
+  if (!queryHasEncoding(rawUrl, qPos + 1, fragmentStart)) return false;
+  i = qPos + 1;
+  while (i < fragmentStart) {
+    var amp2 = rawUrl.indexOf("&", i);
+    if (amp2 === -1 || amp2 > fragmentStart) amp2 = fragmentStart;
+    var eq2 = rawUrl.indexOf("=", i);
+    var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+    if (keyEnd2 - i >= keyLen && valueEquals(rawUrl, i, keyEnd2, key)) {
+      return true;
+    }
+    i = amp2 + 1;
   }
   return false;
 }
@@ -884,6 +1010,7 @@ function queryParamEquals(rawUrl, key, expected) {
   if (hPos !== -1 && hPos < qPos) return false;
   var fragmentStart = hPos === -1 ? rawUrl.length : hPos;
   var keyLen = key.length;
+  var userAmbig = keyIsAmbiguous(key);
   var i = qPos + 1;
   while (i < fragmentStart) {
     var amp = rawUrl.indexOf("&", i);
@@ -891,10 +1018,25 @@ function queryParamEquals(rawUrl, key, expected) {
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
     if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
-      var valStart = eq === -1 || eq > amp ? amp : eq + 1;
-      return valueEquals(rawUrl, valStart, amp, expected);
+      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) {
+        var valStart = eq === -1 || eq > amp ? amp : eq + 1;
+        return valueEquals(rawUrl, valStart, amp, expected);
+      }
     }
     i = amp + 1;
+  }
+  if (!queryHasEncoding(rawUrl, qPos + 1, fragmentStart)) return false;
+  i = qPos + 1;
+  while (i < fragmentStart) {
+    var amp2 = rawUrl.indexOf("&", i);
+    if (amp2 === -1 || amp2 > fragmentStart) amp2 = fragmentStart;
+    var eq2 = rawUrl.indexOf("=", i);
+    var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+    if (keyEnd2 - i >= keyLen && valueEquals(rawUrl, i, keyEnd2, key)) {
+      var valStart2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2 + 1;
+      return valueEquals(rawUrl, valStart2, amp2, expected);
+    }
+    i = amp2 + 1;
   }
   return false;
 }
@@ -909,6 +1051,324 @@ function stripQuery(rawUrl) {
   locate(rawUrl);
   if (LOC_Q === -1) return rawUrl;
   return rawUrl.substring(0, LOC_Q) + rawUrl.substring(LOC_F);
+}
+
+// removeQueryParam — discoverability alias wrapping setQueryParam(...null).
+function removeQueryParam(rawUrl, key) {
+  return setQueryParam(rawUrl, key, null);
+}
+
+// removeQueryParams — direct one-pass implementation. Skips the per-call
+// Object.keys + record allocation that setQueryParams(... {a:null,b:null})
+// would incur. Same (firstChar, length, ambig) prefilter as the other query
+// scanners, plus the byte-strict-then-WHATWG-decoded fallback.
+function removeQueryParams(rawUrl, keys) {
+  var n = keys.length;
+  if (n === 0) return rawUrl;
+
+  locate(rawUrl);
+  var qPos = LOC_Q;
+  if (qPos === -1) return rawUrl;
+  var fragmentStart = LOC_F;
+  var queryEnd = fragmentStart;
+
+  var firstChars = new Array(n);
+  var keyLens = new Array(n);
+  var keyAmbig = new Array(n);
+  for (var k = 0; k < n; k++) {
+    firstChars[k] = keys[k].charCodeAt(0);
+    keyLens[k] = keys[k].length;
+    keyAmbig[k] = keyIsAmbiguous(keys[k]);
+  }
+
+  var queryStart = qPos + 1;
+  var newQuery = "";
+  var i = queryStart;
+  var queryEncodingState = -1;
+
+  while (i < queryEnd) {
+    var amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > queryEnd) amp = queryEnd;
+    var eq = rawUrl.indexOf("=", i);
+    var keyEnd = eq === -1 || eq > amp ? amp : eq;
+    var fieldLen = keyEnd - i;
+    var fc = rawUrl.charCodeAt(i);
+
+    var isMatch = false;
+    for (var k2 = 0; k2 < n; k2++) {
+      if (keyLens[k2] !== fieldLen || firstChars[k2] !== fc) continue;
+      if (rawUrl.startsWith(keys[k2], i)) {
+        if (keyAmbig[k2] && !valueEquals(rawUrl, i, keyEnd, keys[k2])) continue;
+        isMatch = true;
+        break;
+      }
+    }
+
+    if (!isMatch) {
+      var couldMatch = false;
+      for (var k3 = 0; k3 < n; k3++) {
+        if (fieldLen >= keyLens[k3]) {
+          couldMatch = true;
+          break;
+        }
+      }
+      if (couldMatch) {
+        if (queryEncodingState === -1) {
+          queryEncodingState = queryHasEncoding(rawUrl, queryStart, queryEnd)
+            ? 1
+            : 0;
+        }
+        if (queryEncodingState === 1) {
+          var fieldEnc = false;
+          for (var p = i; p < keyEnd; p++) {
+            var c = rawUrl.charCodeAt(p);
+            if (c === CH_PERCENT || c === CH_PLUS) {
+              fieldEnc = true;
+              break;
+            }
+          }
+          if (fieldEnc) {
+            for (var k4 = 0; k4 < n; k4++) {
+              if (
+                fieldLen >= keyLens[k4] &&
+                valueEquals(rawUrl, i, keyEnd, keys[k4])
+              ) {
+                isMatch = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!isMatch) {
+      if (newQuery.length > 0) newQuery += "&";
+      newQuery += rawUrl.substring(i, amp);
+    }
+
+    i = amp + 1;
+  }
+
+  var prefix = rawUrl.substring(0, qPos);
+  var suffix = rawUrl.substring(queryEnd);
+  if (newQuery.length === 0) return prefix + suffix;
+  return prefix + "?" + newQuery + suffix;
+}
+
+// UrlView — precomputed view over a URL. Constructor performs ONE linear
+// scan; every method below is a single substring against cached offsets.
+// Inlined here for the cross-engine bench in the same allocation-free style
+// as the rest of the file.
+//
+// Property assignment order is fixed: all instances share one hidden class
+// across V8/SM/JSC. Underscored props, not #private — `#x` access goes
+// through a WeakMap-style guard that's measurably slower in tight loops.
+function UrlView(rawUrl) {
+  var len = rawUrl.length;
+  var schemePos = rawUrl.indexOf("://");
+
+  var hostStart, hostEnd, portColon, authEnd;
+
+  if (schemePos === -1) {
+    hostStart = -1;
+    hostEnd = -1;
+    portColon = -1;
+    authEnd = 0;
+  } else {
+    var authStart = schemePos + 3;
+    authEnd = findAuthorityEnd(rawUrl, authStart);
+    var at = rawUrl.lastIndexOf("@", authEnd - 1);
+    hostStart = at >= authStart ? at + 1 : authStart;
+
+    if (rawUrl.charCodeAt(hostStart) === 91 /* [ */) {
+      var close = rawUrl.indexOf("]", hostStart + 1);
+      if (close === -1 || close >= authEnd) {
+        hostEnd = authEnd;
+        portColon = -1;
+      } else {
+        hostEnd = close + 1;
+        portColon =
+          hostEnd < authEnd && rawUrl.charCodeAt(hostEnd) === 58 /* : */
+            ? hostEnd
+            : -1;
+      }
+    } else {
+      var colon = rawUrl.indexOf(":", hostStart);
+      if (colon !== -1 && colon < authEnd) {
+        hostEnd = colon;
+        portColon = colon;
+      } else {
+        hostEnd = authEnd;
+        portColon = -1;
+      }
+    }
+  }
+
+  var queryStart = rawUrl.indexOf("?", authEnd);
+  if (queryStart >= len) queryStart = -1;
+  var fragStart = rawUrl.indexOf("#", authEnd);
+  if (fragStart >= len) fragStart = -1;
+  if (queryStart !== -1 && fragStart !== -1 && fragStart < queryStart) {
+    queryStart = -1;
+  }
+
+  this._raw = rawUrl;
+  this._len = len;
+  this._schemeEnd = schemePos;
+  this._hostStart = hostStart;
+  this._hostEnd = hostEnd;
+  this._portColon = portColon;
+  this._authEnd = authEnd;
+  this._queryStart = queryStart;
+  this._fragStart = fragStart;
+}
+
+UrlView.prototype.scheme = function () {
+  return this._schemeEnd === -1
+    ? ""
+    : this._raw.substring(0, this._schemeEnd);
+};
+
+UrlView.prototype.host = function () {
+  return this._schemeEnd === -1
+    ? ""
+    : this._raw.substring(this._hostStart, this._authEnd);
+};
+
+UrlView.prototype.port = function () {
+  if (this._portColon === -1) return null;
+  var p = parsePortRange(this._raw, this._portColon + 1, this._authEnd);
+  return p === -1 ? null : p;
+};
+
+UrlView.prototype.pathname = function () {
+  var start = this._authEnd;
+  var end =
+    this._queryStart !== -1
+      ? this._queryStart
+      : this._fragStart !== -1
+      ? this._fragStart
+      : this._len;
+  return end === start ? "/" : this._raw.substring(start, end);
+};
+
+UrlView.prototype.query = function () {
+  if (this._queryStart === -1) return "";
+  var end = this._fragStart !== -1 ? this._fragStart : this._len;
+  return this._raw.substring(this._queryStart + 1, end);
+};
+
+UrlView.prototype.queryParam = function (key) {
+  if (this._queryStart === -1) return null;
+  var raw = this._raw;
+  var end = this._fragStart !== -1 ? this._fragStart : this._len;
+  var keyLen = key.length;
+  var userAmbig = keyIsAmbiguous(key);
+
+  var i = this._queryStart + 1;
+  while (i < end) {
+    var amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) amp = end;
+    var eq = raw.indexOf("=", i);
+    var keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (keyEnd - i === keyLen && raw.startsWith(key, i)) {
+      if (!userAmbig || valueEquals(raw, i, keyEnd, key)) {
+        if (eq === -1 || eq > amp) return "";
+        return decodeRange(raw, eq + 1, amp);
+      }
+    }
+    i = amp + 1;
+  }
+
+  if (!queryHasEncoding(raw, this._queryStart + 1, end)) return null;
+  i = this._queryStart + 1;
+  while (i < end) {
+    var amp2 = raw.indexOf("&", i);
+    if (amp2 === -1 || amp2 > end) amp2 = end;
+    var eq2 = raw.indexOf("=", i);
+    var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+    if (keyEnd2 - i >= keyLen && valueEquals(raw, i, keyEnd2, key)) {
+      if (eq2 === -1 || eq2 > amp2) return "";
+      return decodeRange(raw, eq2 + 1, amp2);
+    }
+    i = amp2 + 1;
+  }
+  return null;
+};
+
+UrlView.prototype.queryParams = function (keys) {
+  var n = keys.length;
+  var out = {};
+  for (var k = 0; k < n; k++) out[keys[k]] = null;
+  if (n === 0 || this._queryStart === -1) return out;
+
+  var raw = this._raw;
+  var end = this._fragStart !== -1 ? this._fragStart : this._len;
+
+  var firstChars = new Array(n);
+  var keyLens = new Array(n);
+  var keyAmbig = new Array(n);
+  var found = new Array(n);
+  for (var k2 = 0; k2 < n; k2++) {
+    firstChars[k2] = keys[k2].charCodeAt(0);
+    keyLens[k2] = keys[k2].length;
+    keyAmbig[k2] = keyIsAmbiguous(keys[k2]);
+    found[k2] = false;
+  }
+
+  var remaining = n;
+  var i = this._queryStart + 1;
+  while (i < end && remaining > 0) {
+    var amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) amp = end;
+    var eq = raw.indexOf("=", i);
+    var keyEnd = eq === -1 || eq > amp ? amp : eq;
+    var fieldLen = keyEnd - i;
+    var fc = raw.charCodeAt(i);
+
+    for (var k3 = 0; k3 < n; k3++) {
+      if (found[k3]) continue;
+      if (keyLens[k3] !== fieldLen || firstChars[k3] !== fc) continue;
+      if (raw.startsWith(keys[k3], i)) {
+        if (!keyAmbig[k3] || valueEquals(raw, i, keyEnd, keys[k3])) {
+          out[keys[k3]] =
+            eq === -1 || eq > amp ? "" : decodeRange(raw, eq + 1, amp);
+          found[k3] = true;
+          remaining--;
+        }
+      }
+    }
+    i = amp + 1;
+  }
+
+  if (remaining > 0 && queryHasEncoding(raw, this._queryStart + 1, end)) {
+    var j = this._queryStart + 1;
+    while (j < end && remaining > 0) {
+      var amp2 = raw.indexOf("&", j);
+      if (amp2 === -1 || amp2 > end) amp2 = end;
+      var eq2 = raw.indexOf("=", j);
+      var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
+      var fieldLen2 = keyEnd2 - j;
+      for (var k4 = 0; k4 < n; k4++) {
+        if (found[k4]) continue;
+        if (fieldLen2 < keyLens[k4]) continue;
+        if (valueEquals(raw, j, keyEnd2, keys[k4])) {
+          out[keys[k4]] =
+            eq2 === -1 || eq2 > amp2 ? "" : decodeRange(raw, eq2 + 1, amp2);
+          found[k4] = true;
+          remaining--;
+        }
+      }
+      j = amp2 + 1;
+    }
+  }
+
+  return out;
+};
+
+function view(url) {
+  return new UrlView(url);
 }
 
 // --- fixtures ----------------------------------------------------------------
@@ -1008,6 +1468,29 @@ var FIX = {
     "https://z.test:8443/v3",
     "https://w.test:5000/v4",
     "https://q.test:65535/v5",
+  ]),
+  // Plain query but the looked-up key is NOT present (miss path).
+  missQuery: ring([
+    "https://example.com/?a=1&b=2&c=3",
+    "https://example.org/?a=4&b=5&c=6",
+    "https://a.test/?a=7&b=8&c=9",
+    "https://b.test/?a=10&b=11&c=12",
+    "https://c.test/?a=13&b=14&c=15",
+    "https://d.test/?a=16&b=17&c=18",
+    "https://e.test/?a=19&b=20&c=21",
+    "https://f.test/?a=22&b=23&c=24",
+  ]),
+  // Encoded URL key — exercises pass 2 (WHATWG-decoded fallback). The user
+  // key passed to readQueryParam is "weird key" with a literal space.
+  decodedKeyQuery: ring([
+    "https://example.com/?weird%20key=v1&utm=a",
+    "https://example.org/?weird%20key=v2&utm=b",
+    "https://a.test/?weird%20key=v3&utm=c",
+    "https://b.test/?weird%20key=v4&utm=d",
+    "https://c.test/?weird%20key=v5&utm=e",
+    "https://d.test/?weird%20key=v6&utm=f",
+    "https://e.test/?weird%20key=v7&utm=g",
+    "https://f.test/?weird%20key=v8&utm=h",
   ]),
 };
 
@@ -1120,6 +1603,34 @@ if (hasURL) {
   add("URL.long", function () {
     var u = FIX.longQuery[nextIdx()];
     SINK = (SINK + (new URL(u).searchParams.get("q") || "").length) | 0;
+  });
+}
+
+// readQueryParam — miss path (key absent). Exercises queryHasEncoding probe.
+add("rq.miss", function () {
+  var u = FIX.missQuery[nextIdx()];
+  var v = readQueryParam(u, "missing");
+  SINK = (SINK + (v === null ? 0 : v.length)) | 0;
+});
+if (hasURL) {
+  add("URL.miss", function () {
+    var u = FIX.missQuery[nextIdx()];
+    var v = new URL(u).searchParams.get("missing");
+    SINK = (SINK + (v === null ? 0 : v.length)) | 0;
+  });
+}
+
+// readQueryParam — decoded-key fallback path (URL key is percent-encoded;
+// user passes the decoded form). Exercises pass 2 with valueEquals.
+add("rq.decoded_key", function () {
+  var u = FIX.decodedKeyQuery[nextIdx()];
+  SINK = (SINK + (readQueryParam(u, "weird key") || "").length) | 0;
+});
+if (hasURL) {
+  add("URL.decoded_key", function () {
+    var u = FIX.decodedKeyQuery[nextIdx()];
+    SINK =
+      (SINK + (new URL(u).searchParams.get("weird key") || "").length) | 0;
   });
 }
 
@@ -1391,6 +1902,91 @@ if (hasURL) {
   });
 }
 
+// view.read1: single read through view() (allocates UrlView).
+// Expected to be slower than flat readPathname — establishes the breakeven.
+add("view.read1", function () {
+  var u = FIX.fullUrl[nextIdx()];
+  SINK = (SINK + view(u).pathname().length) | 0;
+});
+
+// view.read5: five reads off a single view() (one scan, then cached offsets).
+// Headline case for the wrapper — should beat both urlens-flat-x5 and URL-x5.
+add("view.read5", function () {
+  var u = FIX.fullUrl[nextIdx()];
+  var v = view(u);
+  SINK =
+    (SINK +
+      v.scheme().length +
+      v.host().length +
+      (v.port() || 0) +
+      v.pathname().length +
+      v.query().length) |
+    0;
+});
+
+add("urlens.flat5", function () {
+  var u = FIX.fullUrl[nextIdx()];
+  SINK =
+    (SINK +
+      readScheme(u).length +
+      readHost(u).length +
+      (readPort(u) || 0) +
+      readPathname(u).length +
+      readQuery(u).length) |
+    0;
+});
+
+if (hasURL) {
+  add("URL.read5", function () {
+    var u = FIX.fullUrl[nextIdx()];
+    var p = new URL(u);
+    SINK =
+      (SINK +
+        p.protocol.length +
+        p.host.length +
+        (p.port ? +p.port : 0) +
+        p.pathname.length +
+        p.search.length) |
+      0;
+  });
+}
+
+// view.qp1: single query read through view().
+add("view.qp1", function () {
+  var u = FIX.plainQuery[nextIdx()];
+  SINK = (SINK + (view(u).queryParam("q") || "").length) | 0;
+});
+
+// view.qp.batch: two-key batched read via view().queryParams() object form.
+var VIEW_TWO_KEYS = ["q", "utm_source"];
+add("view.qp.batch", function () {
+  var u = FIX.twoKeyQuery[nextIdx()];
+  var r = view(u).queryParams(VIEW_TWO_KEYS);
+  SINK = (SINK + ((r.q || "").length + (r.utm_source || "").length)) | 0;
+});
+
+// rqp.remove1: sanity check that removeQueryParam alias matches setQueryParam.
+add("rqp.remove1", function () {
+  var u = FIX.plainQuery[nextIdx()];
+  SINK = (SINK + removeQueryParam(u, "utm_source").length) | 0;
+});
+
+// rqp.removeN: bulk removal via removeQueryParams (single pass).
+var REMOVE_KEYS = ["utm_source", "page"];
+add("rqp.removeN", function () {
+  var u = FIX.plainQuery[nextIdx()];
+  SINK = (SINK + removeQueryParams(u, REMOVE_KEYS).length) | 0;
+});
+
+// rqp.removeN.seq: same as rqp.removeN but via N sequential setQueryParam(...null)
+// calls — proves the bulk form wins for N≥2.
+add("rqp.removeN.seq", function () {
+  var u = FIX.plainQuery[nextIdx()];
+  var s = setQueryParam(u, "utm_source", null);
+  s = setQueryParam(s, "page", null);
+  SINK = (SINK + s.length) | 0;
+});
+
 // --- run ---------------------------------------------------------------------
 
 var BUDGET = 600; // ms per case
@@ -1423,6 +2019,8 @@ var pairs = [
   ["rq.plain", "URLSP.plain"],
   ["rq.encoded", "URL.encoded"],
   ["rq.long", "URL.long"],
+  ["rq.miss", "URL.miss"],
+  ["rq.decoded_key", "URL.decoded_key"],
   ["rqs.two", "URL.two"],
   ["rqs.four", "URL.four"],
   ["rp.full", "URL.pathname"],
@@ -1442,6 +2040,15 @@ var pairs = [
   ["om.full", "URL.origin.eq"],
   ["rfrag.full", "URL.hash"],
   ["sp.port.set", "URL.port.set"],
+  // view() wrapper:
+  ["view.read1", "rp.full"], // expected <1x — establishes the cost of allocating
+  ["view.read5", "urlens.flat5"], // headline: one scan beats five
+  ["view.read5", "URL.read5"], // headline vs native batched read
+  ["view.qp1", "rq.plain"], // single query read overhead
+  ["view.qp.batch", "rqs.two"], // batched named-key read
+  // remove* aliases:
+  ["rqp.remove1", "sq.delete"], // sanity — alias should match setQueryParam
+  ["rqp.removeN", "rqp.removeN.seq"], // bulk form should beat N sequential calls
 ];
 for (var pi = 0; pi < pairs.length; pi++) {
   var ours = findPerSec(pairs[pi][0]);

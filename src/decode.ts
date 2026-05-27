@@ -118,8 +118,22 @@ function tolerantDecode(raw: string): string {
   return out;
 }
 
-// Public entry point retained for backwards compatibility and direct use on
-// already-extracted substrings.
+/**
+ * Decodes a percent-encoded URL component using form-urlencoded semantics:
+ * `+` becomes space, `%XY` becomes the corresponding byte (UTF-8 decoded),
+ * and malformed escapes (`%ZZ`, etc.) are preserved literally instead of
+ * throwing.
+ *
+ * This is more tolerant than `decodeURIComponent`, which throws on `%ZZ` —
+ * matching what most user-facing systems actually want.
+ *
+ * Prefer {@link readQueryParam} when reading a value out of a URL — it
+ * skips this function's substring + re-scan dance.
+ *
+ * @example
+ *   decodeQueryComponent("caf%C3%A9+%E2%98%95"); // → "café ☕"
+ *   decodeQueryComponent("%ZZ");                 // → "%ZZ" (preserved)
+ */
 export function decodeQueryComponent(raw: string): string {
   return decodeRange(raw, 0, raw.length);
 }

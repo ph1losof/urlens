@@ -42,6 +42,10 @@ import {
   // strip helpers
   stripQuery,
   stripFragment,
+  removeQueryParam,
+  removeQueryParams,
+  // batched reads (one scan up front, then O(1) reads)
+  view,
   // codec
   decodeQueryComponent,
   encodeQueryComponent,
@@ -95,10 +99,37 @@ setScheme("https://example.com/", "wss");          // → "wss://example.com/"
 setPort("https://example.com:80/api", 8443);       // → "https://example.com:8443/api"
 setPort("https://example.com:80/api", null);       // → "https://example.com/api"
 
-// Strip helpers -------------------------------------------------------------
+// Strip / remove ------------------------------------------------------------
 
 stripQuery("https://example.com/p?q=1#frag");      // → "https://example.com/p#frag"
 stripFragment("https://example.com/p?q=1#frag");   // → "https://example.com/p?q=1"
+
+removeQueryParam("https://example.com/?a=1&utm=ig", "utm");
+// → "https://example.com/?a=1"
+
+removeQueryParams(
+  "https://example.com/?q=hi&utm_source=ig&utm_campaign=spring",
+  ["utm_source", "utm_campaign"],
+);
+// → "https://example.com/?q=hi"
+
+// Batched reads — pay one scan, then O(1) reads ----------------------------
+// For 2+ components off the same URL, view() amortizes the scan.
+
+const v = view("https://example.com:8080/api/v1?q=hello+world#frag");
+v.scheme();        // → "https"
+v.host();          // → "example.com:8080"
+v.hostname();      // → "example.com"
+v.port();          // → 8080
+v.pathname();      // → "/api/v1"
+v.query();         // → "q=hello+world"
+v.fragment();      // → "frag"
+v.queryParam("q"); // → "hello world"
+
+// Object-keyed batched read — destructure by name:
+const { q, utm_source } = view(
+  "https://example.com/r?q=hi&utm_source=ig",
+).queryParams(["q", "utm_source"] as const);
 
 // Codec ---------------------------------------------------------------------
 
@@ -124,7 +155,7 @@ encodeQueryComponent("hello world");               // → "hello+world"
 | Function | Signature |
 |---|---|
 | `readQueryParam` | `(url: string, key: string) => string \| null` |
-| `readQueryParams` | `(url: string, keys: readonly string[]) => (string \| null)[]` |
+| `readQueryParams` | `<const K extends readonly string[]>(url: string, keys: K) => { -readonly [I in keyof K]: string \| null }` |
 | `readQuery` | `(url: string) => string` |
 | `readPathname` | `(url: string) => string` |
 | `readOrigin` | `(url: string) => string` |
@@ -144,12 +175,37 @@ encodeQueryComponent("hello world");               // → "hello+world"
 | `setScheme` | `(url: string, scheme: string) => string` |
 | `setPort` | `(url: string, port: number \| null) => string` |
 
-**Strip helpers**
+**Strip / remove**
 
 | Function | Signature |
 |---|---|
 | `stripQuery` | `(url: string) => string` |
 | `stripFragment` | `(url: string) => string` |
+| `removeQueryParam` | `(url: string, key: string) => string` |
+| `removeQueryParams` | `(url: string, keys: readonly string[]) => string` |
+
+**Batched reads**
+
+`view(url)` pays one linear scan up front and caches every component boundary as an integer offset. Each method on the returned `UrlView` is a single `substring` (sliced-string view) against those offsets — no scanning. Use this when you need two or more components off the same URL string; for a single read, the flat top-level functions are strictly faster.
+
+| Function | Signature |
+|---|---|
+| `view` | `(url: string) => UrlView` |
+| `UrlView#scheme` | `() => string` |
+| `UrlView#origin` | `() => string` |
+| `UrlView#host` | `() => string` |
+| `UrlView#hostname` | `() => string` |
+| `UrlView#port` | `() => number \| null` |
+| `UrlView#pathname` | `() => string` |
+| `UrlView#query` | `() => string` |
+| `UrlView#fragment` | `() => string` |
+| `UrlView#queryParam` | `(key: string) => string \| null` |
+| `UrlView#queryParams` | `<const K extends readonly string[]>(keys: K) => { [P in K[number]]: string \| null }` |
+| `UrlView#hasQueryParam` | `(key: string) => boolean` |
+| `UrlView#queryParamEquals` | `(key: string, expected: string) => boolean` |
+| `UrlView#pathnameStartsWith` | `(prefix: string) => boolean` |
+| `UrlView#pathnameEndsWith` | `(suffix: string) => boolean` |
+| `UrlView#toString` | `() => string` |
 
 **Codec**
 
@@ -165,7 +221,9 @@ Notes:
 - `originMatches` compares **scheme + hostname case-insensitively** — `https://EXAMPLE.com/` matches `https://example.com/` and `[2001:DB8::1]` matches `[2001:db8::1]`. Userinfo is stripped from both sides.
 - **`hasScheme` is case-insensitive** — `hasScheme("HTTPS://x/", "https")` is true. URL schemes are case-insensitive per RFC; WHATWG normalizes them to lowercase.
 - **`encodeQueryComponent` is WHATWG `application/x-www-form-urlencoded`** — safe set is exactly `* - . _ 0-9 A-Z a-z`; spaces become `+`; everything else is percent-encoded. This differs from `encodeURIComponent`, which also leaves `! ' ( ) ~` unescaped.
-- `readQueryParams` returns a parallel array — same length and order as the input `keys`. It scans the query string once and exits as soon as every requested key is found.
+- `readQueryParams` returns a tuple positionally aligned with the input `keys` — pass keys with `as const` for full destructure-by-position typing. It scans the query string once and exits as soon as every requested key is found. For destructure-by-**name**, use `view(url).queryParams(keys)` instead — it returns an object keyed by the input keys.
+- **`view(url)`** trades one wrapper-object allocation for O(1) subsequent reads. Use it when you need ≥2 components off the same URL. For single reads, the flat top-level functions are strictly faster — they don't pay the wrapper cost.
+- `removeQueryParam` is a discoverability alias for `setQueryParam(url, key, null)`. `removeQueryParams` is a single-pass bulk form — strictly cheaper than calling `removeQueryParam` N times, which would rebuild the query string N times.
 - `setQueryParam(url, key, null)` removes the key. If the key has duplicates, the first occurrence is replaced and the rest are removed — matches `URLSearchParams.set`.
 - `setQueryParams` is a single-pass bulk setter. `null` in the dict removes the key. Keys not yet in the URL are appended at the end.
 - `setPathname` / `setPort` / `setScheme` preserve every other URL part (userinfo, fragment, IPv6 brackets, etc.). `setPort(url, null)` removes the port and its colon. `setPort` throws `RangeError` for non-integer or out-of-range ports.
@@ -173,7 +231,7 @@ Notes:
 - `readOrigin`, `readHost`, `readHostname`, `readPort`, `originMatches` all strip userinfo (`user:pass@`) and handle IPv6 bracketed hosts (`[::1]`).
 - `readScheme` returns the scheme without the trailing `:` (unlike `URL.protocol`). `readFragment` and `readQuery` strip the leading `#`/`?` (unlike `URL.hash`/`URL.search`).
 - `readHost` returns `hostname:port` if a port is present (canonical authority form, IPv6 brackets kept). `readHostname` returns the bare hostname with IPv6 brackets stripped. `readPort` returns a `number | null` — null when no explicit port is set or the port is malformed.
-- **Keys are treated literally** for matching and writing. Callers with non-ASCII keys should pre-encode them via `encodeQueryComponent`. Values are encoded/decoded automatically.
+- **Keys are matched per WHATWG `application/x-www-form-urlencoded`** — `+` decodes to space, percent-encoded UTF-8 is decoded, U+FFFD for malformed. A byte-strict pass runs first with near-zero overhead; the WHATWG-decoded fallback only fires when the byte-strict pass misses *and* the URL has `%`/`+` in the query. So `readQueryParam("https://x.test/?weird%20key=v", "weird key")` returns `"v"`.
 
 ## Benchmarks
 
@@ -185,30 +243,39 @@ Real browser engines via Playwright, 600ms per case, inputs rotated through 8 di
 
 | case | V8 (Chrome) | SpiderMonkey (Firefox) | JSC (WebKit) |
 |---|---|---|---|
-| read query, plain ASCII | 24.3× | 20.0× | 18.4× |
-| read query, percent-encoded UTF-8 | 7.1× | 11.7× | 7.1× |
-| read query, 12 params, key near end | 17.9× | 6.6× | 11.2× |
-| read 2 keys (`readQueryParams`) | 6.4× | 6.8× | 7.7× |
-| read 4 keys (`readQueryParams`) | 4.7× | 4.5× | 5.7× |
-| read pathname (full URL) | 9.4× | 16.1× | 9.5× |
-| read pathname (path-only) | 14.4× | 37.4× | 11.3× |
-| read origin | 11.4× | 17.4× | 13.2× |
-| read scheme | 17.6× | 44.5× | 20.3× |
-| read host | 6.2× | 12.6× | 7.7× |
-| read hostname | 5.0× | 11.3× | 6.2× |
-| read port | 5.2× | 11.2× | 6.5× |
-| set query (replace) | 16.4× | 14.2× | 18.7× |
-| set query (append) | 16.3× | 14.6× | 22.3× |
-| set query (delete) | 16.3× | 15.6× | 20.2× |
-| set pathname | 9.4× | 23.7× | 12.5× |
-| `hasQueryParam` | 32.5× | 33.4× | 24.7× |
-| `queryParamEquals` (ASCII fast path) | 14.9× | 16.0× | 13.5× |
-| `pathnameStartsWith` | 7.0× | 14.3× | 7.7× |
-| `originMatches` | 8.0× | 14.4× | 11.2× |
-| read fragment | 22.6× | 66.7× | 18.6× |
-| set port | 7.3× | 11.5× | 10.0× |
+| read query, plain ASCII | 20.2× | 17.7× | 18.1× |
+| read query, percent-encoded UTF-8 | 6.5× | 11.4× | 7.9× |
+| read query, 12 params, key near end | 16.0× | 6.6× | 11.3× |
+| read query, key absent (miss path) | 13.9× | 13.4× | 13.9× |
+| read query, encoded URL key (decoded match) | 8.8× | 7.5× | 7.3× |
+| read 2 keys (`readQueryParams`) | 6.0× | 5.8× | 6.1× |
+| read 4 keys (`readQueryParams`) | 4.0× | 4.0× | 4.8× |
+| read pathname (full URL) | 9.9× | 16.5× | 8.4× |
+| read pathname (path-only) | 15.0× | 38.2× | 13.5× |
+| read origin | 11.4× | 18.2× | 14.0× |
+| read scheme | 17.2× | 42.7× | 20.7× |
+| read host | 6.2× | 12.7× | 7.7× |
+| read hostname | 5.0× | 11.4× | 6.1× |
+| read port | 5.3× | 10.9× | 6.8× |
+| set query (replace) | 11.2× | 10.6× | 15.5× |
+| set query (append) | 11.9× | 11.5× | 18.3× |
+| set query (delete) | 12.8× | 11.2× | 16.2× |
+| set pathname | 9.5× | 23.8× | 12.4× |
+| `hasQueryParam` | 22.4× | 29.5× | 20.9× |
+| `queryParamEquals` (ASCII fast path) | 12.4× | 15.2× | 12.5× |
+| `pathnameStartsWith` | 7.0× | 14.7× | 9.1× |
+| `originMatches` | 7.6× | 15.7× | 11.2× |
+| read fragment | 16.4× | 68.0× | 18.8× |
+| set port | 7.2× | 14.9× | 10.5× |
+| `view().pathname()` vs flat `readPathname` (1 read) | 0.5× | 0.6× | 0.6× |
+| `view()` 5 reads vs flat 5 reads | 1.6× | 1.6× | 1.6× |
+| `view()` 5 reads vs `new URL()` + 5 props | 6.0× | 11.3× | 5.3× |
+| `view().queryParam()` vs flat `readQueryParam` | 0.5× | 0.4× | 0.5× |
+| `view().queryParams()` vs `readQueryParams` (2 keys) | 0.7× | 0.8× | 0.8× |
+| `removeQueryParam` vs `setQueryParam(…, null)` | 0.9× | 1.1× | 1.0× |
+| `removeQueryParams` (bulk) vs N sequential | 1.5× | 1.4× | 2.3× |
 
-Absolute throughput on the hot path: **~27.6M / ~13.8M / ~20.6M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
+Absolute throughput on the hot path: **~22.6M / ~12.1M / ~20.1M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
 
 <!-- BENCH:END -->
 
@@ -238,10 +305,27 @@ There are two real tradeoffs:
 1. **No validation.** `urlens` never throws on malformed input — it returns a best-effort substring. If a URL is structurally broken, `urlens` won't tell you.
 2. **`decodeQueryComponent` is tolerant.** Where `decodeURIComponent` throws on `%ZZ`, `urlens` preserves the literal text. This matches what most user-facing systems actually want.
 
+## WHATWG compliance
+
+`urlens` is **fully WHATWG-conformant on every operation it performs**. Where we have a corresponding `URL` / `URLSearchParams` operation we match its result byte-for-byte:
+
+- **Key matching** follows `application/x-www-form-urlencoded` decoding on both sides. `readQueryParam("?weird%20key=v", "weird key")` returns `"v"` — same as `URLSearchParams.get`. Byte-strict is tried first (near-zero overhead); the decoded fallback only fires when needed.
+- **Value decoding** is full WHATWG UTF-8 with U+FFFD replacement for malformed sequences (lone continuation bytes, overlong sequences, surrogate-range encodings).
+- **`encodeQueryComponent`** matches `application/x-www-form-urlencoded` exactly — safe set is `* - . _ 0-9 A-Z a-z`, spaces become `+`, everything else percent-encoded. Same output as `new URLSearchParams([[k, v]]).toString()`.
+- **`originMatches`** infers implicit ports for special schemes (http=80, https=443, ws=80, wss=443, ftp=21), compares schemes + hostnames case-insensitively, and strips userinfo from both sides — same semantics as `URL.origin === URL.origin`.
+
+What we **deliberately don't do** (the *"where it's pragmatic"* cut — these would require sizable code and constant per-call work for very rare wins):
+
+- **No IDN / Punycode** — `xn--` ↔ Unicode hostname conversion. Browsers ship ~50KB of Unicode tables for this; we don't.
+- **No IPv6 canonicalization** — we preserve the input's `[…]` byte form. `[2001:0db8::0001]` is not byte-equal to `[2001:db8::1]`.
+- **No path normalization** — `setPathname` doesn't collapse `..` / `.` segments.
+- **No scheme case-normalization on *read*** — `readScheme("HTTPS://x/")` returns `"HTTPS"`. (`hasScheme` and `originMatches` compare case-insensitively, so this doesn't affect comparison semantics.)
+
+The contract: **assume the input URL is already well-formed.** If it came from a browser, `fetch`, `URL`, or any WHATWG-conformant builder, it's already normalized — `urlens` reads and writes against it correctly without re-canonicalizing every byte. If you feed in raw user input, run it through `new URL(input).toString()` first to canonicalize.
+
 ## Limitations
 
-- **Keys are matched literally.** `readQueryParam(url, "weird key")` won't find `?weird%20key=v`. Pre-encode the key via `encodeQueryComponent` if it contains non-trivial chars. Values are encoded/decoded automatically.
-- **No path normalization.** `setPathname` doesn't collapse `..` or `.` segments — pass the path you want written verbatim (after a leading `/` is added).
+- **No validation.** `urlens` never throws on malformed URLs — it returns best-effort substrings.
 - **No host validation.** `readOrigin` doesn't verify that the host is well-formed — it returns the substring between scheme and authority terminator.
 - **`setScheme` / `setPort` no-op on schemeless inputs.** They don't synthesize a scheme — pass a fully-qualified URL or build one with string concat first.
 

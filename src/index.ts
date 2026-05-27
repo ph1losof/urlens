@@ -6,6 +6,8 @@ export {
   readQuery,
   readQueryParam,
   readQueryParams,
+  removeQueryParam,
+  removeQueryParams,
   setQueryParam,
   setQueryParams,
   stripQuery,
@@ -27,3 +29,4 @@ export {
   setScheme,
   stripFragment,
 } from "./url.js";
+export { UrlView, view } from "./view.js";
