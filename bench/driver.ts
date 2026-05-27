@@ -1,10 +1,27 @@
-import { readFileSync } from "node:fs";
 import { type BrowserType, chromium, firefox, webkit } from "playwright";
 
-const benchSrc = readFileSync(new URL("./bench.js", import.meta.url), "utf8");
+// Bundle the harness (which imports the public API from ../src) as a single
+// IIFE that runs in a browser page context. Bun's bundler resolves the ESM
+// imports across src/ at build time; the resulting script needs no module
+// system at runtime, so page.evaluate can eval it directly.
+const harnessPath = new URL("./harness.ts", import.meta.url).pathname;
+const build = await Bun.build({
+  entrypoints: [harnessPath],
+  target: "browser",
+  format: "iife",
+  minify: false,
+});
+if (!build.success) {
+  for (const log of build.logs) {
+    console.error(log);
+  }
+  throw new Error("bench harness bundle failed");
+}
+const benchSrc = await build.outputs[0].text();
 
-// The harness uses `out()` which falls back to console.log. We override it
-// to collect into an array so we can return the full transcript to Node.
+// The harness calls `print(...)` to emit lines. We override `globalThis.print`
+// before eval so each line lands in `__lines`, then return the joined text to
+// Node for the parser in scripts/update-readme-bench.ts.
 const wrapper = `
 (async () => {
   const __lines = [];
