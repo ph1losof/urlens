@@ -185,30 +185,30 @@ Real browser engines via Playwright, 600ms per case, inputs rotated through 8 di
 
 | case | V8 (Chrome) | SpiderMonkey (Firefox) | JSC (WebKit) |
 |---|---|---|---|
-| read query, plain ASCII | 24.6× | 19.2× | 15.9× |
-| read query, percent-encoded UTF-8 | 7.3× | 12.3× | 7.6× |
-| read query, 12 params, key near end | 17.6× | 7.1× | 11.3× |
-| read 2 keys (`readQueryParams`) | 6.7× | 7.1× | 6.8× |
-| read 4 keys (`readQueryParams`) | 4.7× | 4.2× | 5.8× |
-| read pathname (full URL) | 11.1× | 16.5× | 13.4× |
-| read pathname (path-only) | 14.9× | 37.6× | 16.8× |
-| read origin | 11.0× | 16.7× | 12.9× |
-| read scheme | 17.5× | 42.1× | 17.5× |
-| read host | 6.3× | 11.6× | 8.3× |
-| read hostname | 5.0× | 9.9× | 7.2× |
-| read port | 5.3× | 14.5× | 6.4× |
-| set query (replace) | 12.4× | 14.7× | 15.2× |
-| set query (append) | 14.1× | 12.2× | 17.9× |
-| set query (delete) | 17.8× | 15.3× | 19.3× |
-| set pathname | 9.7× | 26.3× | 12.2× |
-| `hasQueryParam` | 28.7× | 32.0× | 24.7× |
-| `queryParamEquals` (ASCII fast path) | 13.9× | 16.9× | 12.3× |
-| `pathnameStartsWith` | 7.0× | 15.9× | 8.8× |
-| `originMatches` | 7.7× | 14.4× | 10.8× |
-| read fragment | 15.8× | 71.4× | 17.1× |
-| set port | 7.0× | 12.9× | 9.6× |
+| read query, plain ASCII | 24.3× | 20.0× | 18.4× |
+| read query, percent-encoded UTF-8 | 7.1× | 11.7× | 7.1× |
+| read query, 12 params, key near end | 17.9× | 6.6× | 11.2× |
+| read 2 keys (`readQueryParams`) | 6.4× | 6.8× | 7.7× |
+| read 4 keys (`readQueryParams`) | 4.7× | 4.5× | 5.7× |
+| read pathname (full URL) | 9.4× | 16.1× | 9.5× |
+| read pathname (path-only) | 14.4× | 37.4× | 11.3× |
+| read origin | 11.4× | 17.4× | 13.2× |
+| read scheme | 17.6× | 44.5× | 20.3× |
+| read host | 6.2× | 12.6× | 7.7× |
+| read hostname | 5.0× | 11.3× | 6.2× |
+| read port | 5.2× | 11.2× | 6.5× |
+| set query (replace) | 16.4× | 14.2× | 18.7× |
+| set query (append) | 16.3× | 14.6× | 22.3× |
+| set query (delete) | 16.3× | 15.6× | 20.2× |
+| set pathname | 9.4× | 23.7× | 12.5× |
+| `hasQueryParam` | 32.5× | 33.4× | 24.7× |
+| `queryParamEquals` (ASCII fast path) | 14.9× | 16.0× | 13.5× |
+| `pathnameStartsWith` | 7.0× | 14.3× | 7.7× |
+| `originMatches` | 8.0× | 14.4× | 11.2× |
+| read fragment | 22.6× | 66.7× | 18.6× |
+| set port | 7.3× | 11.5× | 10.0× |
 
-Absolute throughput on the hot path: **~27.8M / ~13.1M / ~17.8M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
+Absolute throughput on the hot path: **~27.6M / ~13.8M / ~20.6M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
 
 <!-- BENCH:END -->
 
