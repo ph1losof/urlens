@@ -11,6 +11,67 @@ export const CH_OPEN_BRACKET = 91;
 export const CH_AT = 64;
 export const CH_0 = 48;
 export const CH_9 = 57;
+export const CH_AMP = 38;
+export const CH_EQ = 61;
+
+// Finds the position of `key` as a complete query-string field name within
+// `rawUrl[start..end)`. Returns the index where `key` begins, or -1 if no
+// boundary-valid match exists.
+//
+// A field-name match requires:
+//   • prev byte is '?' or '&' (param boundary)
+//   • next byte (or end-of-range) is '=' or '&' (key name terminator)
+//
+// Two-stage scan:
+//   1. Direct startsWith at `start` — covers the very common "key is the
+//      first field of the query" shape with zero indexOf overhead.
+//   2. Otherwise, one SIMD-vectorized String.prototype.indexOf(key) per
+//      iteration. V8/SM/JSC implement small-needle search with vectorized
+//      scans, so for long queries with the key near the end this is
+//      dramatically faster than walking each field separately.
+//
+// `start` MUST point one past the '?' (so prev==='?' at start is implicit).
+// Returns -1 when no match is found within the range.
+export function findKeyMatch(
+  rawUrl: string,
+  start: number,
+  end: number,
+  key: string
+): number {
+  const keyLen = key.length;
+  // Stage 1: first-field probe. prev is implicitly '?' by the contract.
+  const after0 = start + keyLen;
+  if (after0 <= end && rawUrl.startsWith(key, start)) {
+    if (after0 === end) {
+      return start;
+    }
+    const next0 = rawUrl.charCodeAt(after0);
+    if (next0 === CH_EQ || next0 === CH_AMP) {
+      return start;
+    }
+  }
+  // Stage 2: SIMD indexOf scan over the remaining range.
+  let pos = start + 1;
+  while (pos < end) {
+    const idx = rawUrl.indexOf(key, pos);
+    if (idx === -1 || idx + keyLen > end) {
+      return -1;
+    }
+    const prev = rawUrl.charCodeAt(idx - 1);
+    if (prev === CH_QUESTION || prev === CH_AMP) {
+      const after = idx + keyLen;
+      if (after === end) {
+        return idx;
+      }
+      const next = rawUrl.charCodeAt(after);
+      if (next === CH_EQ || next === CH_AMP) {
+        return idx;
+      }
+    }
+    pos = idx + 1;
+  }
+  return -1;
+}
 
 // Returns the index of the first '/', '?', or '#' at or after `start`, or the
 // string length if none are present. One linear pass — faster than three

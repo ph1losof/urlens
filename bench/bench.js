@@ -19,6 +19,9 @@ var hasURLSearchParams = typeof URLSearchParams !== "undefined";
 var CH_PERCENT = 37;
 var CH_PLUS = 43;
 var CH_SLASH = 47;
+var CH_AMP = 38;
+var CH_EQ = 61;
+var CH_QM = 63;
 
 var UTF8_DECODER =
   typeof TextDecoder !== "undefined" ? new TextDecoder() : null;
@@ -150,6 +153,38 @@ function keyIsAmbiguous(key) {
   return key.indexOf("%") !== -1 || key.indexOf("+") !== -1;
 }
 
+// Locates `key` as a complete query-string field name within [start, end).
+// Returns the start index of the match, or -1 if no boundary-valid match
+// exists. Two-stage scan:
+//   1. Direct startsWith at `start` (the very common "key is first field"
+//      shape; prev is implicitly '?' by the contract).
+//   2. Otherwise, SIMD-vectorized indexOf(key) per iteration with boundary
+//      checks. Strictly fewer string ops per field than a per-field walk
+//      using indexOf("&") + indexOf("=") + startsWith.
+function findKeyMatch(rawUrl, start, end, key) {
+  var keyLen = key.length;
+  var after0 = start + keyLen;
+  if (after0 <= end && rawUrl.startsWith(key, start)) {
+    if (after0 === end) return start;
+    var next0 = rawUrl.charCodeAt(after0);
+    if (next0 === CH_EQ || next0 === CH_AMP) return start;
+  }
+  var pos = start + 1;
+  while (pos < end) {
+    var idx = rawUrl.indexOf(key, pos);
+    if (idx === -1 || idx + keyLen > end) return -1;
+    var prev = rawUrl.charCodeAt(idx - 1);
+    if (prev === CH_QM || prev === CH_AMP) {
+      var after = idx + keyLen;
+      if (after === end) return idx;
+      var next = rawUrl.charCodeAt(after);
+      if (next === CH_EQ || next === CH_AMP) return idx;
+    }
+    pos = idx + 1;
+  }
+  return -1;
+}
+
 // Combined-scan setter key analyzer — single pass produces both the encoded
 // form and the ambiguity flag, written to module-level scratch.
 var KEY_ENCODED = "";
@@ -188,25 +223,44 @@ function readQueryParam(rawUrl, key) {
   if (qPos === -1) return null;
   var end = LOC_F;
   var keyLen = key.length;
-  var userAmbig = keyIsAmbiguous(key);
-  // Pass 1: byte-strict.
-  var i = qPos + 1;
+  var queryStart = qPos + 1;
+  // Fast path: clean ASCII key. One SIMD indexOf(key) + boundary check.
+  if (!keyIsAmbiguous(key)) {
+    var idx = findKeyMatch(rawUrl, queryStart, end, key);
+    if (idx !== -1) {
+      var after = idx + keyLen;
+      if (after === end || rawUrl.charCodeAt(after) === CH_AMP) return "";
+      // next === '='
+      var ampF = rawUrl.indexOf("&", after + 1);
+      if (ampF === -1 || ampF > end) ampF = end;
+      return decodeRange(rawUrl, after + 1, ampF);
+    }
+    if (!queryHasEncoding(rawUrl, queryStart, end)) return null;
+    return readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
+  }
+  // Ambiguous user key: each byte-equal hit verified via WHATWG walker.
+  var i = queryStart;
   while (i < end) {
     var amp = rawUrl.indexOf("&", i);
     if (amp === -1 || amp > end) amp = end;
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
-      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) {
-        if (eq === -1 || eq > amp) return "";
-        return decodeRange(rawUrl, eq + 1, amp);
-      }
+    if (
+      keyEnd - i === keyLen &&
+      rawUrl.startsWith(key, i) &&
+      valueEquals(rawUrl, i, keyEnd, key)
+    ) {
+      if (eq === -1 || eq > amp) return "";
+      return decodeRange(rawUrl, eq + 1, amp);
     }
     i = amp + 1;
   }
-  // Pass 2: WHATWG-decoded fallback (only if URL has encoding).
-  if (!queryHasEncoding(rawUrl, qPos + 1, end)) return null;
-  i = qPos + 1;
+  if (!queryHasEncoding(rawUrl, queryStart, end)) return null;
+  return readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
+}
+
+function readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen) {
+  var i = queryStart;
   while (i < end) {
     var amp2 = rawUrl.indexOf("&", i);
     if (amp2 === -1 || amp2 > end) amp2 = end;
@@ -851,24 +905,37 @@ function hasQueryParam(rawUrl, key) {
   var hPos = rawUrl.indexOf("#");
   if (hPos !== -1 && hPos < qPos) return false;
   var fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+  var queryStart = qPos + 1;
   var keyLen = key.length;
-  var userAmbig = keyIsAmbiguous(key);
-  var i = qPos + 1;
+  if (!keyIsAmbiguous(key)) {
+    if (findKeyMatch(rawUrl, queryStart, fragmentStart, key) !== -1) return true;
+    if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) return false;
+    return hasQueryParamDecodedFallback(rawUrl, queryStart, fragmentStart, key, keyLen);
+  }
+  var i = queryStart;
   while (i < fragmentStart) {
     var amp = rawUrl.indexOf("&", i);
     if (amp === -1 || amp > fragmentStart) amp = fragmentStart;
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
-      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) return true;
+    if (
+      keyEnd - i === keyLen &&
+      rawUrl.startsWith(key, i) &&
+      valueEquals(rawUrl, i, keyEnd, key)
+    ) {
+      return true;
     }
     i = amp + 1;
   }
-  if (!queryHasEncoding(rawUrl, qPos + 1, fragmentStart)) return false;
-  i = qPos + 1;
-  while (i < fragmentStart) {
+  if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) return false;
+  return hasQueryParamDecodedFallback(rawUrl, queryStart, fragmentStart, key, keyLen);
+}
+
+function hasQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen) {
+  var i = queryStart;
+  while (i < end) {
     var amp2 = rawUrl.indexOf("&", i);
-    if (amp2 === -1 || amp2 > fragmentStart) amp2 = fragmentStart;
+    if (amp2 === -1 || amp2 > end) amp2 = end;
     var eq2 = rawUrl.indexOf("=", i);
     var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
     if (keyEnd2 - i >= keyLen && valueEquals(rawUrl, i, keyEnd2, key)) {
@@ -1009,27 +1076,47 @@ function queryParamEquals(rawUrl, key, expected) {
   var hPos = rawUrl.indexOf("#");
   if (hPos !== -1 && hPos < qPos) return false;
   var fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+  var queryStart = qPos + 1;
   var keyLen = key.length;
-  var userAmbig = keyIsAmbiguous(key);
-  var i = qPos + 1;
+  if (!keyIsAmbiguous(key)) {
+    var idx = findKeyMatch(rawUrl, queryStart, fragmentStart, key);
+    if (idx !== -1) {
+      var after = idx + keyLen;
+      if (after === fragmentStart || rawUrl.charCodeAt(after) === CH_AMP) {
+        return expected.length === 0;
+      }
+      var ampF = rawUrl.indexOf("&", after + 1);
+      if (ampF === -1 || ampF > fragmentStart) ampF = fragmentStart;
+      return valueEquals(rawUrl, after + 1, ampF, expected);
+    }
+    if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) return false;
+    return queryParamEqualsDecodedFallback(rawUrl, queryStart, fragmentStart, key, keyLen, expected);
+  }
+  var i = queryStart;
   while (i < fragmentStart) {
     var amp = rawUrl.indexOf("&", i);
     if (amp === -1 || amp > fragmentStart) amp = fragmentStart;
     var eq = rawUrl.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i === keyLen && rawUrl.startsWith(key, i)) {
-      if (!userAmbig || valueEquals(rawUrl, i, keyEnd, key)) {
-        var valStart = eq === -1 || eq > amp ? amp : eq + 1;
-        return valueEquals(rawUrl, valStart, amp, expected);
-      }
+    if (
+      keyEnd - i === keyLen &&
+      rawUrl.startsWith(key, i) &&
+      valueEquals(rawUrl, i, keyEnd, key)
+    ) {
+      var valStart = eq === -1 || eq > amp ? amp : eq + 1;
+      return valueEquals(rawUrl, valStart, amp, expected);
     }
     i = amp + 1;
   }
-  if (!queryHasEncoding(rawUrl, qPos + 1, fragmentStart)) return false;
-  i = qPos + 1;
-  while (i < fragmentStart) {
+  if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) return false;
+  return queryParamEqualsDecodedFallback(rawUrl, queryStart, fragmentStart, key, keyLen, expected);
+}
+
+function queryParamEqualsDecodedFallback(rawUrl, queryStart, end, key, keyLen, expected) {
+  var i = queryStart;
+  while (i < end) {
     var amp2 = rawUrl.indexOf("&", i);
-    if (amp2 === -1 || amp2 > fragmentStart) amp2 = fragmentStart;
+    if (amp2 === -1 || amp2 > end) amp2 = end;
     var eq2 = rawUrl.indexOf("=", i);
     var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
     if (keyEnd2 - i >= keyLen && valueEquals(rawUrl, i, keyEnd2, key)) {
@@ -1263,38 +1350,40 @@ UrlView.prototype.queryParam = function (key) {
   if (this._queryStart === -1) return null;
   var raw = this._raw;
   var end = this._fragStart !== -1 ? this._fragStart : this._len;
+  var queryStart = this._queryStart + 1;
   var keyLen = key.length;
-  var userAmbig = keyIsAmbiguous(key);
 
-  var i = this._queryStart + 1;
+  if (!keyIsAmbiguous(key)) {
+    var idx = findKeyMatch(raw, queryStart, end, key);
+    if (idx !== -1) {
+      var after = idx + keyLen;
+      if (after === end || raw.charCodeAt(after) === CH_AMP) return "";
+      var ampF = raw.indexOf("&", after + 1);
+      if (ampF === -1 || ampF > end) ampF = end;
+      return decodeRange(raw, after + 1, ampF);
+    }
+    if (!queryHasEncoding(raw, queryStart, end)) return null;
+    return readQueryParamDecodedFallback(raw, queryStart, end, key, keyLen);
+  }
+
+  var i = queryStart;
   while (i < end) {
     var amp = raw.indexOf("&", i);
     if (amp === -1 || amp > end) amp = end;
     var eq = raw.indexOf("=", i);
     var keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i === keyLen && raw.startsWith(key, i)) {
-      if (!userAmbig || valueEquals(raw, i, keyEnd, key)) {
-        if (eq === -1 || eq > amp) return "";
-        return decodeRange(raw, eq + 1, amp);
-      }
+    if (
+      keyEnd - i === keyLen &&
+      raw.startsWith(key, i) &&
+      valueEquals(raw, i, keyEnd, key)
+    ) {
+      if (eq === -1 || eq > amp) return "";
+      return decodeRange(raw, eq + 1, amp);
     }
     i = amp + 1;
   }
-
-  if (!queryHasEncoding(raw, this._queryStart + 1, end)) return null;
-  i = this._queryStart + 1;
-  while (i < end) {
-    var amp2 = raw.indexOf("&", i);
-    if (amp2 === -1 || amp2 > end) amp2 = end;
-    var eq2 = raw.indexOf("=", i);
-    var keyEnd2 = eq2 === -1 || eq2 > amp2 ? amp2 : eq2;
-    if (keyEnd2 - i >= keyLen && valueEquals(raw, i, keyEnd2, key)) {
-      if (eq2 === -1 || eq2 > amp2) return "";
-      return decodeRange(raw, eq2 + 1, amp2);
-    }
-    i = amp2 + 1;
-  }
-  return null;
+  if (!queryHasEncoding(raw, queryStart, end)) return null;
+  return readQueryParamDecodedFallback(raw, queryStart, end, key, keyLen);
 };
 
 UrlView.prototype.queryParams = function (keys) {

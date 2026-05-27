@@ -1,8 +1,10 @@
 import { decodeRange } from "./decode.js";
 import {
+  CH_AMP,
   CH_COLON,
   CH_OPEN_BRACKET,
   findAuthorityEnd,
+  findKeyMatch,
   parsePortRange,
 } from "./internal.js";
 import {
@@ -231,35 +233,31 @@ export class UrlView {
     }
     const raw = this._raw;
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const queryStart = this._queryStart + 1;
     const keyLen = key.length;
-    const userAmbig = keyIsAmbiguous(key);
 
-    // Pass 1: byte-strict.
-    let i = this._queryStart + 1;
-    while (i < end) {
-      let amp = raw.indexOf("&", i);
-      if (amp === -1 || amp > end) {
-        amp = end;
-      }
-      const eq = raw.indexOf("=", i);
-      const keyEnd = eq === -1 || eq > amp ? amp : eq;
-      if (keyEnd - i === keyLen && raw.startsWith(key, i)) {
-        if (!userAmbig || compareDecodedValueRange(raw, i, keyEnd, key)) {
-          if (eq === -1 || eq > amp) {
-            return "";
-          }
-          return decodeRange(raw, eq + 1, amp);
+    // Fast path: clean ASCII key. Single SIMD indexOf with boundary check.
+    if (!keyIsAmbiguous(key)) {
+      const idx = findKeyMatch(raw, queryStart, end, key);
+      if (idx !== -1) {
+        const after = idx + keyLen;
+        if (after === end || raw.charCodeAt(after) === CH_AMP) {
+          return "";
         }
+        let amp = raw.indexOf("&", after + 1);
+        if (amp === -1 || amp > end) {
+          amp = end;
+        }
+        return decodeRange(raw, after + 1, amp);
       }
-      i = amp + 1;
+      if (!queryHasEncoding(raw, queryStart, end)) {
+        return null;
+      }
+      return queryParamDecodedFallback(raw, queryStart, end, key, keyLen);
     }
 
-    // Pass 2: WHATWG-decoded fallback. Skip when URL has no encoding —
-    // byte-strict was conclusive.
-    if (!queryHasEncoding(raw, this._queryStart + 1, end)) {
-      return null;
-    }
-    i = this._queryStart + 1;
+    // Ambiguous user key: verify each byte-equal hit with the WHATWG walker.
+    let i = queryStart;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
@@ -268,7 +266,8 @@ export class UrlView {
       const eq = raw.indexOf("=", i);
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
-        keyEnd - i >= keyLen &&
+        keyEnd - i === keyLen &&
+        raw.startsWith(key, i) &&
         compareDecodedValueRange(raw, i, keyEnd, key)
       ) {
         if (eq === -1 || eq > amp) {
@@ -278,7 +277,10 @@ export class UrlView {
       }
       i = amp + 1;
     }
-    return null;
+    if (!queryHasEncoding(raw, queryStart, end)) {
+      return null;
+    }
+    return queryParamDecodedFallback(raw, queryStart, end, key, keyLen);
   }
 
   /**
@@ -398,31 +400,20 @@ export class UrlView {
     }
     const raw = this._raw;
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const queryStart = this._queryStart + 1;
     const keyLen = key.length;
-    const userAmbig = keyIsAmbiguous(key);
 
-    // Pass 1: byte-strict.
-    let i = this._queryStart + 1;
-    while (i < end) {
-      let amp = raw.indexOf("&", i);
-      if (amp === -1 || amp > end) {
-        amp = end;
+    if (!keyIsAmbiguous(key)) {
+      if (findKeyMatch(raw, queryStart, end, key) !== -1) {
+        return true;
       }
-      const eq = raw.indexOf("=", i);
-      const keyEnd = eq === -1 || eq > amp ? amp : eq;
-      if (keyEnd - i === keyLen && raw.startsWith(key, i)) {
-        if (!userAmbig || compareDecodedValueRange(raw, i, keyEnd, key)) {
-          return true;
-        }
+      if (!queryHasEncoding(raw, queryStart, end)) {
+        return false;
       }
-      i = amp + 1;
+      return hasQueryParamDecodedFallback(raw, queryStart, end, key, keyLen);
     }
 
-    // Pass 2: WHATWG-decoded fallback.
-    if (!queryHasEncoding(raw, this._queryStart + 1, end)) {
-      return false;
-    }
-    i = this._queryStart + 1;
+    let i = queryStart;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
@@ -431,14 +422,18 @@ export class UrlView {
       const eq = raw.indexOf("=", i);
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
-        keyEnd - i >= keyLen &&
+        keyEnd - i === keyLen &&
+        raw.startsWith(key, i) &&
         compareDecodedValueRange(raw, i, keyEnd, key)
       ) {
         return true;
       }
       i = amp + 1;
     }
-    return false;
+    if (!queryHasEncoding(raw, queryStart, end)) {
+      return false;
+    }
+    return hasQueryParamDecodedFallback(raw, queryStart, end, key, keyLen);
   }
 
   /**
@@ -453,32 +448,36 @@ export class UrlView {
     }
     const raw = this._raw;
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const queryStart = this._queryStart + 1;
     const keyLen = key.length;
-    const userAmbig = keyIsAmbiguous(key);
 
-    // Pass 1: byte-strict key match, then value compare via the same walker.
-    let i = this._queryStart + 1;
-    while (i < end) {
-      let amp = raw.indexOf("&", i);
-      if (amp === -1 || amp > end) {
-        amp = end;
-      }
-      const eq = raw.indexOf("=", i);
-      const keyEnd = eq === -1 || eq > amp ? amp : eq;
-      if (keyEnd - i === keyLen && raw.startsWith(key, i)) {
-        if (!userAmbig || compareDecodedValueRange(raw, i, keyEnd, key)) {
-          const valStart = eq === -1 || eq > amp ? amp : eq + 1;
-          return compareDecodedValueRange(raw, valStart, amp, expected);
+    if (!keyIsAmbiguous(key)) {
+      const idx = findKeyMatch(raw, queryStart, end, key);
+      if (idx !== -1) {
+        const after = idx + keyLen;
+        if (after === end || raw.charCodeAt(after) === CH_AMP) {
+          return expected.length === 0;
         }
+        let amp = raw.indexOf("&", after + 1);
+        if (amp === -1 || amp > end) {
+          amp = end;
+        }
+        return compareDecodedValueRange(raw, after + 1, amp, expected);
       }
-      i = amp + 1;
+      if (!queryHasEncoding(raw, queryStart, end)) {
+        return false;
+      }
+      return queryParamEqualsDecodedFallback(
+        raw,
+        queryStart,
+        end,
+        key,
+        keyLen,
+        expected
+      );
     }
 
-    // Pass 2: WHATWG-decoded key match.
-    if (!queryHasEncoding(raw, this._queryStart + 1, end)) {
-      return false;
-    }
-    i = this._queryStart + 1;
+    let i = queryStart;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
@@ -487,7 +486,8 @@ export class UrlView {
       const eq = raw.indexOf("=", i);
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
-        keyEnd - i >= keyLen &&
+        keyEnd - i === keyLen &&
+        raw.startsWith(key, i) &&
         compareDecodedValueRange(raw, i, keyEnd, key)
       ) {
         const valStart = eq === -1 || eq > amp ? amp : eq + 1;
@@ -495,7 +495,18 @@ export class UrlView {
       }
       i = amp + 1;
     }
-    return false;
+
+    if (!queryHasEncoding(raw, queryStart, end)) {
+      return false;
+    }
+    return queryParamEqualsDecodedFallback(
+      raw,
+      queryStart,
+      end,
+      key,
+      keyLen,
+      expected
+    );
   }
 
   /** Zero-allocation predicate: returns `true` if the pathname starts with `prefix`. */
@@ -535,6 +546,84 @@ export class UrlView {
     }
     return this._raw.startsWith(suffix, end - suffix.length);
   }
+}
+
+// Module-level fallbacks — used by UrlView's query methods only when the
+// fast path misses and the URL has '%' or '+' in the query. Mirror the
+// helpers in query.ts; kept private to this module.
+
+function queryParamDecodedFallback(
+  raw: string,
+  queryStart: number,
+  end: number,
+  key: string,
+  keyLen: number
+): string | null {
+  let i = queryStart;
+  while (i < end) {
+    let amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = raw.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
+      if (eq === -1 || eq > amp) {
+        return "";
+      }
+      return decodeRange(raw, eq + 1, amp);
+    }
+    i = amp + 1;
+  }
+  return null;
+}
+
+function hasQueryParamDecodedFallback(
+  raw: string,
+  queryStart: number,
+  end: number,
+  key: string,
+  keyLen: number
+): boolean {
+  let i = queryStart;
+  while (i < end) {
+    let amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = raw.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
+      return true;
+    }
+    i = amp + 1;
+  }
+  return false;
+}
+
+function queryParamEqualsDecodedFallback(
+  raw: string,
+  queryStart: number,
+  end: number,
+  key: string,
+  keyLen: number,
+  expected: string
+): boolean {
+  let i = queryStart;
+  while (i < end) {
+    let amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = raw.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
+      const valStart = eq === -1 || eq > amp ? amp : eq + 1;
+      return compareDecodedValueRange(raw, valStart, amp, expected);
+    }
+    i = amp + 1;
+  }
+  return false;
 }
 
 /**
