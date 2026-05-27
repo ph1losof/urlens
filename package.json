@@ -1,0 +1,45 @@
+{
+  "name": "urlens",
+  "version": "0.5.2",
+  "description": "Zero-allocation URL slicing — 5-73x faster than the native URL parser. Read, write, and predicate functions that compare bytes in place without allocating.",
+  "keywords": [
+    "url",
+    "query-string",
+    "pathname",
+    "origin",
+    "fast",
+    "zero-allocation"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "bench": "bun bench/driver.ts",
+    "bench:update-readme": "bun bench/driver.ts 2>&1 | tee bench-output.txt && bun scripts/update-readme-bench.ts bench-output.txt && rm bench-output.txt",
+    "check": "biome check",
+    "fix": "biome check --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@types/bun": "^1.3.14",
+    "playwright": "^1.60.0",
+    "typescript": "^6.0.3"
+  }
+}
