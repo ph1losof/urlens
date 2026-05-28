@@ -75,9 +75,20 @@ export function queryHasEncoding(
 // are WHATWG-correct and can be returned immediately; if true, each
 // byte-equal hit is verified with compareDecodedValueRange.
 //
+// One charCodeAt loop instead of two SIMD indexOf calls. Keys are typically
+// short (1–15 chars); SIMD's setup cost dominates the per-call work at that
+// length, so a manual scan is measurably faster.
+//
 // Module-internal export: shared with UrlView via view.ts. Not in index.ts.
 export function keyIsAmbiguous(key: string): boolean {
-  return key.indexOf("%") !== -1 || key.indexOf("+") !== -1;
+  const len = key.length;
+  for (let p = 0; p < len; p++) {
+    const c = key.charCodeAt(p);
+    if (c === CH_PERCENT || c === CH_PLUS) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Setter combined-scan helper.
@@ -302,18 +313,16 @@ export function readQueryParams<const K extends readonly string[]>(
     return out as { -readonly [I in keyof K]: string | null };
   }
 
-  // Precompute (firstChar, length, ambig) for each key. The inner loop
-  // rejects candidate params with two integer compares — far cheaper than a
-  // startsWith call for every (param, key) pair — and only verifies ambiguous
-  // keys with the decoded walker on hit.
-  const firstChars: number[] = new Array(n);
-  const keyLens: number[] = new Array(n);
+  // Precompute (firstChar << 16 | length) packed prefilter + ambig flag for
+  // each key. The inner loop's hot reject is a single int compare against the
+  // field's matching pack — half the array reads and compares vs. holding
+  // firstChar and length as separate arrays.
+  const keyPacked: number[] = new Array(n);
   const keyAmbig: boolean[] = new Array(n);
   for (let k = 0; k < n; k++) {
     out[k] = null;
     const kk = keys[k];
-    firstChars[k] = kk.charCodeAt(0);
-    keyLens[k] = kk.length;
+    keyPacked[k] = kk.charCodeAt(0) * 65536 + kk.length;
     keyAmbig[k] = keyIsAmbiguous(kk);
   }
 
@@ -334,14 +343,13 @@ export function readQueryParams<const K extends readonly string[]>(
     }
     const eq = rawUrl.indexOf("=", i);
     const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    const fieldLen = keyEnd - i;
-    const fc = rawUrl.charCodeAt(i);
+    const fieldPacked = rawUrl.charCodeAt(i) * 65536 + (keyEnd - i);
 
     for (let k = 0; k < n; k++) {
       if (out[k] !== null) {
         continue;
       }
-      if (keyLens[k] !== fieldLen || firstChars[k] !== fc) {
+      if (keyPacked[k] !== fieldPacked) {
         continue;
       }
       if (rawUrl.startsWith(keys[k], i)) {
@@ -375,7 +383,7 @@ export function readQueryParams<const K extends readonly string[]>(
         if (out[k] !== null) {
           continue;
         }
-        if (fieldLen < keyLens[k]) {
+        if (fieldLen < keys[k].length) {
           continue;
         }
         if (compareDecodedValueRange(rawUrl, j, keyEnd, keys[k])) {
@@ -546,13 +554,14 @@ export function setQueryParams(
     return rawUrl;
   }
 
-  // Pre-encode keys + non-null values + precompute (firstChar, length, ambig)
-  // for the matcher loop. Combined-scan per key (analyzeSetterKey) avoids
-  // double walks for clean ASCII keys.
+  // Pre-encode keys + non-null values + precompute packed (firstChar<<16|len)
+  // and ambig flag for the matcher loop. Single-int prefilter is half the
+  // array reads and compares vs. holding firstChar and length separately.
+  // Combined-scan per key (analyzeSetterKey) avoids double walks for clean
+  // ASCII keys.
   const encoded: (string | null)[] = new Array(n);
   const encodedKeys: string[] = new Array(n);
-  const firstChars: number[] = new Array(n);
-  const keyLens: number[] = new Array(n);
+  const keyPacked: number[] = new Array(n);
   const keyAmbig: boolean[] = new Array(n);
   const seen = new Array<boolean>(n).fill(false);
   for (let k = 0; k < n; k++) {
@@ -561,8 +570,7 @@ export function setQueryParams(
     analyzeSetterKey(keys[k]);
     encodedKeys[k] = KEY_ENCODED;
     keyAmbig[k] = KEY_AMBIG;
-    firstChars[k] = keys[k].charCodeAt(0);
-    keyLens[k] = keys[k].length;
+    keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
   }
 
   locate(rawUrl);
@@ -600,11 +608,11 @@ export function setQueryParams(
     const eq = rawUrl.indexOf("=", i);
     const keyEnd = eq === -1 || eq > amp ? amp : eq;
     const fieldLen = keyEnd - i;
-    const fc = rawUrl.charCodeAt(i);
+    const fieldPacked = rawUrl.charCodeAt(i) * 65536 + fieldLen;
 
     let matchedSlot = -1;
     for (let k = 0; k < n; k++) {
-      if (keyLens[k] !== fieldLen || firstChars[k] !== fc) {
+      if (keyPacked[k] !== fieldPacked) {
         continue;
       }
       if (rawUrl.startsWith(keys[k], i)) {
@@ -623,7 +631,7 @@ export function setQueryParams(
     if (matchedSlot === -1) {
       let couldMatch = false;
       for (let k = 0; k < n; k++) {
-        if (fieldLen >= keyLens[k]) {
+        if (fieldLen >= keys[k].length) {
           couldMatch = true;
           break;
         }
@@ -646,7 +654,7 @@ export function setQueryParams(
           if (fieldEnc) {
             for (let k = 0; k < n; k++) {
               if (
-                fieldLen >= keyLens[k] &&
+                fieldLen >= keys[k].length &&
                 compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
               ) {
                 matchedSlot = k;
@@ -744,12 +752,10 @@ export function removeQueryParams(
   const fragmentStart = LOC_F;
   const queryEnd = fragmentStart;
 
-  const firstChars: number[] = new Array(n);
-  const keyLens: number[] = new Array(n);
+  const keyPacked: number[] = new Array(n);
   const keyAmbig: boolean[] = new Array(n);
   for (let k = 0; k < n; k++) {
-    firstChars[k] = keys[k].charCodeAt(0);
-    keyLens[k] = keys[k].length;
+    keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
     keyAmbig[k] = keyIsAmbiguous(keys[k]);
   }
 
@@ -766,11 +772,11 @@ export function removeQueryParams(
     const eq = rawUrl.indexOf("=", i);
     const keyEnd = eq === -1 || eq > amp ? amp : eq;
     const fieldLen = keyEnd - i;
-    const fc = rawUrl.charCodeAt(i);
+    const fieldPacked = rawUrl.charCodeAt(i) * 65536 + fieldLen;
 
     let isMatch = false;
     for (let k = 0; k < n; k++) {
-      if (keyLens[k] !== fieldLen || firstChars[k] !== fc) {
+      if (keyPacked[k] !== fieldPacked) {
         continue;
       }
       if (rawUrl.startsWith(keys[k], i)) {
@@ -789,7 +795,7 @@ export function removeQueryParams(
     if (!isMatch) {
       let couldMatch = false;
       for (let k = 0; k < n; k++) {
-        if (fieldLen >= keyLens[k]) {
+        if (fieldLen >= keys[k].length) {
           couldMatch = true;
           break;
         }
@@ -812,7 +818,7 @@ export function removeQueryParams(
           if (fieldEnc) {
             for (let k = 0; k < n; k++) {
               if (
-                fieldLen >= keyLens[k] &&
+                fieldLen >= keys[k].length &&
                 compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
               ) {
                 isMatch = true;

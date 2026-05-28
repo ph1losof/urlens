@@ -316,13 +316,13 @@ export class UrlView {
     const raw = this._raw;
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
 
-    const firstChars: number[] = new Array(n);
-    const keyLens: number[] = new Array(n);
+    // Pack (firstChar << 16 | length) per key — inner-loop prefilter is one
+    // int compare instead of two array reads + two compares.
+    const keyPacked: number[] = new Array(n);
     const keyAmbig: boolean[] = new Array(n);
     const found: boolean[] = new Array(n);
     for (let k = 0; k < n; k++) {
-      firstChars[k] = keys[k].charCodeAt(0);
-      keyLens[k] = keys[k].length;
+      keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
       keyAmbig[k] = keyIsAmbiguous(keys[k]);
       found[k] = false;
     }
@@ -337,14 +337,13 @@ export class UrlView {
       }
       const eq = raw.indexOf("=", i);
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
-      const fieldLen = keyEnd - i;
-      const fc = raw.charCodeAt(i);
+      const fieldPacked = raw.charCodeAt(i) * 65536 + (keyEnd - i);
 
       for (let k = 0; k < n; k++) {
         if (found[k]) {
           continue;
         }
-        if (keyLens[k] !== fieldLen || firstChars[k] !== fc) {
+        if (keyPacked[k] !== fieldPacked) {
           continue;
         }
         if (raw.startsWith(keys[k], i)) {
@@ -379,7 +378,7 @@ export class UrlView {
           if (found[k]) {
             continue;
           }
-          if (fieldLen < keyLens[k]) {
+          if (fieldLen < keys[k].length) {
             continue;
           }
           if (compareDecodedValueRange(raw, j, keyEnd, keys[k])) {
