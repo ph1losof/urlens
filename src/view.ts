@@ -1,5 +1,6 @@
 import { decodeRange } from "./decode.js";
 import {
+  AUTH_LAST_AT,
   CH_AMP,
   CH_COLON,
   CH_OPEN_BRACKET,
@@ -77,7 +78,7 @@ export class UrlView {
     } else {
       const authStart = schemePos + 3;
       authEnd = findAuthorityEnd(rawUrl, authStart);
-      const at = rawUrl.lastIndexOf("@", authEnd - 1);
+      const at = AUTH_LAST_AT;
       hostStart = at >= authStart ? at + 1 : authStart;
 
       if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {

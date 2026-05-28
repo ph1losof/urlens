@@ -1,4 +1,5 @@
 import {
+  AUTH_LAST_AT,
   CH_0,
   CH_9,
   CH_COLON,
@@ -29,7 +30,7 @@ let AUTH_E = 0;
 function locateHostRange(s: string, schemeEnd: number): void {
   const authStart = schemeEnd + 3;
   const authEnd = findAuthorityEnd(s, authStart);
-  const at = s.lastIndexOf("@", authEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authStart ? at + 1 : authStart;
   let hostEnd: number;
   let portColon: number;
@@ -161,7 +162,7 @@ export function readOrigin(rawUrl: string): string {
   // percent-encoded, so the LAST literal '@' within the authority terminates
   // userinfo. lastIndexOf is bounded by authorityEnd-1. IPv6 hosts ('[::1]')
   // cannot contain '@', so this is also correct for IPv6 without special casing.
-  const at = rawUrl.lastIndexOf("@", authorityEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   if (hostStart === authorityStart) {
@@ -211,7 +212,7 @@ export function readHost(rawUrl: string): string {
   }
   const authorityStart = schemePos + 3;
   const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = rawUrl.lastIndexOf("@", authorityEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
   return rawUrl.substring(hostStart, authorityEnd);
 }
@@ -233,7 +234,7 @@ export function readHostname(rawUrl: string): string {
   }
   const authorityStart = schemePos + 3;
   const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = rawUrl.lastIndexOf("@", authorityEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
@@ -270,7 +271,7 @@ export function readPort(rawUrl: string): number | null {
   }
   const authorityStart = schemePos + 3;
   const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = rawUrl.lastIndexOf("@", authorityEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   let portStart: number;
@@ -549,7 +550,7 @@ export function setPort(rawUrl: string, port: number | null): string {
   }
   const authorityStart = schemePos + 3;
   const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = rawUrl.lastIndexOf("@", authorityEnd - 1);
+  const at = AUTH_LAST_AT;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   // Locate existing port boundaries.

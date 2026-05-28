@@ -12,6 +12,7 @@ export const CH_0 = 48;
 export const CH_9 = 57;
 export const CH_AMP = 38;
 const CH_EQ = 61;
+const CH_AT = 64;
 
 // Finds the position of `key` as a complete query-string field name within
 // `rawUrl[start..end)`. Returns the index where `key` begins, or -1 if no
@@ -73,18 +74,36 @@ export function findKeyMatch(
   return -1;
 }
 
+// Module-scope scalar updated by findAuthorityEnd: position of the LAST '@'
+// in the authority range, or -1 if absent. WHATWG userinfo terminates at the
+// LAST literal '@' (any '@' inside userinfo must be percent-encoded), so this
+// matches `lastIndexOf("@", authorityEnd - 1)` semantics, but is computed
+// inline as part of the existing authority scan — saving 8 callsites from a
+// separate scan whose backward range is wasted for URLs without userinfo.
+// Single-threaded JS guarantees reading this immediately after the call is safe.
+// biome-ignore lint/style/useConst: written by findAuthorityEnd; read by callers
+export let AUTH_LAST_AT = -1;
+
 // Returns the index of the first '/', '?', or '#' at or after `start`, or the
 // string length if none are present. One linear pass — faster than three
 // separate indexOf calls when the authority is short, and never worse.
+// Also writes AUTH_LAST_AT with the position of the last '@' seen in
+// [start, returned-index) — see the AUTH_LAST_AT comment above.
 // fallow-ignore-next-line complexity
 export function findAuthorityEnd(rawUrl: string, start: number): number {
   const len = rawUrl.length;
+  let lastAt = -1;
   for (let i = start; i < len; i++) {
     const c = rawUrl.charCodeAt(i);
     if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
+      AUTH_LAST_AT = lastAt;
       return i;
     }
+    if (c === CH_AT) {
+      lastAt = i;
+    }
   }
+  AUTH_LAST_AT = lastAt;
   return len;
 }
 

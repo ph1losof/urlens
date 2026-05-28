@@ -55,6 +55,10 @@ function locate(rawUrl: string): void {
 // Two SIMD-accelerated indexOf calls; the early return after the first hit
 // makes the typical "encoded value, plain query" case ~5ns.
 //
+// A manual one-pass charCodeAt scan was benched and reverted: SIMD wins on
+// the query-range inputs here (10–80 chars), unlike the short-key case in
+// keyIsAmbiguous where SIMD setup cost dominated.
+//
 // Module-internal export: shared with UrlView via view.ts. Not in index.ts.
 export function queryHasEncoding(
   rawUrl: string,
