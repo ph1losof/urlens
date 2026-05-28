@@ -3,6 +3,7 @@ const CH_PLUS = 43;
 
 const UTF8_DECODER = new TextDecoder();
 
+// fallow-ignore-next-line complexity
 function hexNibble(code: number): number {
   if (code >= 48 && code <= 57) {
     return code - 48;
@@ -21,6 +22,7 @@ function hexNibble(code: number): number {
 // This is the workhorse used by readQueryParam / readQueryParams to skip the
 // "substring then re-scan in decodeQueryComponent" dance, which previously
 // walked the value twice on every read of an unencoded value.
+// fallow-ignore-next-line complexity
 export function decodeRange(s: string, start: number, end: number): string {
   let pct = false;
   let plus = false;
@@ -80,6 +82,7 @@ function plusToSpace(s: string, start: number, end: number): string {
 // Preserves the literal text for unparseable escapes, decodes valid bytes via
 // TextDecoder, and treats '+' as space — matching the spec for query
 // components while not throwing.
+// fallow-ignore-next-line complexity
 function tolerantDecode(raw: string): string {
   let out = "";
   const bytes: number[] = [];

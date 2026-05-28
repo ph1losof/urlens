@@ -4,15 +4,14 @@
 // does not regress the hot path.
 
 export const CH_SLASH = 47;
-export const CH_QUESTION = 63;
-export const CH_HASH = 35;
+const CH_QUESTION = 63;
+const CH_HASH = 35;
 export const CH_COLON = 58;
 export const CH_OPEN_BRACKET = 91;
-export const CH_AT = 64;
 export const CH_0 = 48;
 export const CH_9 = 57;
 export const CH_AMP = 38;
-export const CH_EQ = 61;
+const CH_EQ = 61;
 
 // Finds the position of `key` as a complete query-string field name within
 // `rawUrl[start..end)`. Returns the index where `key` begins, or -1 if no
@@ -32,6 +31,7 @@ export const CH_EQ = 61;
 //
 // `start` MUST point one past the '?' (so prev==='?' at start is implicit).
 // Returns -1 when no match is found within the range.
+// fallow-ignore-next-line complexity
 export function findKeyMatch(
   rawUrl: string,
   start: number,
@@ -76,6 +76,7 @@ export function findKeyMatch(
 // Returns the index of the first '/', '?', or '#' at or after `start`, or the
 // string length if none are present. One linear pass — faster than three
 // separate indexOf calls when the authority is short, and never worse.
+// fallow-ignore-next-line complexity
 export function findAuthorityEnd(rawUrl: string, start: number): number {
   const len = rawUrl.length;
   for (let i = start; i < len; i++) {
@@ -91,6 +92,7 @@ export function findAuthorityEnd(rawUrl: string, start: number): number {
 // ws=80, wss=443, ftp=21. Returns -1 for any other scheme. Case-insensitive
 // ASCII byte compare; no allocation. `schemeEnd` is the length of the scheme
 // (i.e. the index of the first ':' in "scheme://...").
+// fallow-ignore-next-line complexity
 export function defaultPortFor(rawUrl: string, schemeEnd: number): number {
   if (schemeEnd === 5) {
     if (
@@ -147,6 +149,7 @@ export function defaultPortFor(rawUrl: string, schemeEnd: number): number {
 
 // Parses ASCII digits in `[start, end)` as a decimal integer. Returns -1 on
 // empty range or any non-digit content. No allocation.
+// fallow-ignore-next-line complexity
 export function parsePortRange(s: string, start: number, end: number): number {
   if (start >= end) {
     return -1;

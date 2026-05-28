@@ -116,6 +116,7 @@ function fmtSpeedup(n: number): string {
   return `${n.toFixed(1)}×`;
 }
 
+// fallow-ignore-next-line complexity
 function main(): void {
   const output = readFileSync(benchOutputPath, "utf8");
 

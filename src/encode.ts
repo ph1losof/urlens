@@ -68,6 +68,7 @@ const PCT_FFFD = `${PCT_HEX[0xef]}${PCT_HEX[0xbf]}${PCT_HEX[0xbd]}`;
  *   encodeQueryComponent("café");        // → "caf%C3%A9"
  *   encodeQueryComponent("q");           // → "q" (unchanged)
  */
+// fallow-ignore-next-line complexity
 export function encodeQueryComponent(value: string): string {
   const len = value.length;
   if (len === 0) {

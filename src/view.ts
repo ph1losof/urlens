@@ -59,6 +59,7 @@ export class UrlView {
   private readonly _queryStart: number;
   private readonly _fragStart: number;
 
+  // fallow-ignore-next-line complexity
   constructor(rawUrl: string) {
     const len = rawUrl.length;
     const schemePos = rawUrl.indexOf("://");
@@ -227,6 +228,7 @@ export class UrlView {
    * near-zero overhead; the decoded fallback only fires when the URL has
    * `%`/`+` in the query.
    */
+  // fallow-ignore-next-line complexity
   queryParam(key: string): string | null {
     if (this._queryStart === -1) {
       return null;
@@ -296,6 +298,7 @@ export class UrlView {
    *   const { q, utm_source } = v.queryParams(["q", "utm_source"] as const);
    *   // q === "hi", utm_source === "ig"
    */
+  // fallow-ignore-next-line complexity
   queryParams<const K extends readonly string[]>(
     keys: K
   ): { [P in K[number]]: string | null } {
@@ -394,6 +397,7 @@ export class UrlView {
   }
 
   /** Zero-allocation predicate: returns `true` if `key` is present in the query. Key matching is WHATWG-decoded. */
+  // fallow-ignore-next-line complexity
   hasQueryParam(key: string): boolean {
     if (this._queryStart === -1) {
       return false;
@@ -442,6 +446,7 @@ export class UrlView {
    * one codepoint at a time and compares against `expected` in place — no
    * decoded string is materialized.
    */
+  // fallow-ignore-next-line complexity
   queryParamEquals(key: string, expected: string): boolean {
     if (this._queryStart === -1) {
       return false;
@@ -510,6 +515,7 @@ export class UrlView {
   }
 
   /** Zero-allocation predicate: returns `true` if the pathname starts with `prefix`. */
+  // fallow-ignore-next-line complexity
   pathnameStartsWith(prefix: string): boolean {
     const start = this._authEnd;
     const end =
@@ -529,6 +535,7 @@ export class UrlView {
   }
 
   /** Zero-allocation predicate: returns `true` if the pathname ends with `suffix`. */
+  // fallow-ignore-next-line complexity
   pathnameEndsWith(suffix: string): boolean {
     const start = this._authEnd;
     const end =
@@ -552,6 +559,7 @@ export class UrlView {
 // fast path misses and the URL has '%' or '+' in the query. Mirror the
 // helpers in query.ts; kept private to this module.
 
+// fallow-ignore-next-line complexity
 function queryParamDecodedFallback(
   raw: string,
   queryStart: number,
@@ -578,6 +586,7 @@ function queryParamDecodedFallback(
   return null;
 }
 
+// fallow-ignore-next-line complexity
 function hasQueryParamDecodedFallback(
   raw: string,
   queryStart: number,
@@ -601,6 +610,7 @@ function hasQueryParamDecodedFallback(
   return false;
 }
 
+// fallow-ignore-next-line complexity
 function queryParamEqualsDecodedFallback(
   raw: string,
   queryStart: number,

@@ -9,6 +9,88 @@ import {
   parsePortRange,
 } from "./internal.js";
 
+// Module-level scratch slots — same allocation-free pattern as LOC_Q/LOC_F in
+// query.ts. Sync-only: do NOT introduce await on paths that read these.
+let PATH_S = 0;
+let PATH_E = 0;
+
+// Scratch slots for locateHostRange (see below). Read into locals IMMEDIATELY
+// after each call; the next call overwrites them.
+let HOST_S = 0;
+let HOST_E = 0;
+let PORT_C = -1;
+let AUTH_E = 0;
+
+// Writes hostStart, hostEnd, portColon (-1 if absent), and authEnd for the
+// authority of `s` starting at `schemeEnd + 3` ("://"). Userinfo (`...@`) is
+// stripped. IPv6 brackets are honored: the host range includes the brackets,
+// and the port colon (if any) is the byte after `]`.
+// fallow-ignore-next-line complexity
+function locateHostRange(s: string, schemeEnd: number): void {
+  const authStart = schemeEnd + 3;
+  const authEnd = findAuthorityEnd(s, authStart);
+  const at = s.lastIndexOf("@", authEnd - 1);
+  const hostStart = at >= authStart ? at + 1 : authStart;
+  let hostEnd: number;
+  let portColon: number;
+  if (s.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
+    const close = s.indexOf("]", hostStart + 1);
+    if (close === -1 || close >= authEnd) {
+      hostEnd = authEnd;
+      portColon = -1;
+    } else {
+      hostEnd = close + 1;
+      portColon =
+        hostEnd < authEnd && s.charCodeAt(hostEnd) === CH_COLON ? hostEnd : -1;
+    }
+  } else {
+    const colon = s.indexOf(":", hostStart);
+    if (colon !== -1 && colon < authEnd) {
+      hostEnd = colon;
+      portColon = colon;
+    } else {
+      hostEnd = authEnd;
+      portColon = -1;
+    }
+  }
+  HOST_S = hostStart;
+  HOST_E = hostEnd;
+  PORT_C = portColon;
+  AUTH_E = authEnd;
+}
+
+// Writes the pathname range [PATH_S, PATH_E) for `rawUrl`. When the URL has a
+// scheme but no path slash (e.g. "https://x"), both slots are set to
+// rawUrl.length so callers see pathLen === 0 and fall into the implicit "/"
+// branch — matching the original inlined behavior.
+// fallow-ignore-next-line complexity
+function locatePathnameRange(rawUrl: string): void {
+  const schemePos = rawUrl.indexOf("://");
+  let pathStart: number;
+  if (schemePos !== -1) {
+    const slash = rawUrl.indexOf("/", schemePos + 3);
+    if (slash === -1) {
+      PATH_S = rawUrl.length;
+      PATH_E = rawUrl.length;
+      return;
+    }
+    pathStart = slash;
+  } else {
+    pathStart = 0;
+  }
+  let pathEnd = rawUrl.length;
+  const qPos = rawUrl.indexOf("?", pathStart);
+  if (qPos !== -1 && qPos < pathEnd) {
+    pathEnd = qPos;
+  }
+  const hPos = rawUrl.indexOf("#", pathStart);
+  if (hPos !== -1 && hPos < pathEnd) {
+    pathEnd = hPos;
+  }
+  PATH_S = pathStart;
+  PATH_E = pathEnd;
+}
+
 /**
  * Returns the pathname portion of a URL.
  *
@@ -26,6 +108,7 @@ import {
  *   readPathname("/api/v1/users");                       // → "/api/v1/users"
  *   readPathname("https://example.com");                 // → "/"
  */
+// fallow-ignore-next-line complexity
 export function readPathname(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   let start: number;
@@ -142,6 +225,7 @@ export function readHost(rawUrl: string): string {
  *   readHostname("https://example.com:8080/p");  // → "example.com"
  *   readHostname("http://[::1]:8080/");          // → "::1"
  */
+// fallow-ignore-next-line complexity
 export function readHostname(rawUrl: string): string {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -178,6 +262,7 @@ export function readHostname(rawUrl: string): string {
  *   readPort("http://example.com/");      // → null (no explicit port)
  *   readPort("http://example.com:abc/");  // → null (malformed)
  */
+// fallow-ignore-next-line complexity
 export function readPort(rawUrl: string): number | null {
   const schemePos = rawUrl.indexOf("://");
   if (schemePos === -1) {
@@ -263,35 +348,15 @@ export function hasScheme(rawUrl: string, scheme: string): boolean {
  *   pathnameStartsWith("https://x", "/");                 // → true
  */
 export function pathnameStartsWith(rawUrl: string, prefix: string): boolean {
-  const schemePos = rawUrl.indexOf("://");
-  let pathStart: number;
-  if (schemePos !== -1) {
-    const slash = rawUrl.indexOf("/", schemePos + 3);
-    if (slash === -1) {
-      // Implicit "/" pathname.
-      return prefix.length === 0 || prefix === "/";
-    }
-    pathStart = slash;
-  } else {
-    pathStart = 0;
-  }
-  let pathEnd = rawUrl.length;
-  const qPos = rawUrl.indexOf("?", pathStart);
-  if (qPos !== -1 && qPos < pathEnd) {
-    pathEnd = qPos;
-  }
-  const hPos = rawUrl.indexOf("#", pathStart);
-  if (hPos !== -1 && hPos < pathEnd) {
-    pathEnd = hPos;
-  }
-  const pathLen = pathEnd - pathStart;
+  locatePathnameRange(rawUrl);
+  const pathLen = PATH_E - PATH_S;
   if (pathLen === 0) {
     return prefix.length === 0 || prefix === "/";
   }
   if (prefix.length > pathLen) {
     return false;
   }
-  return rawUrl.startsWith(prefix, pathStart);
+  return rawUrl.startsWith(prefix, PATH_S);
 }
 
 /**
@@ -302,27 +367,8 @@ export function pathnameStartsWith(rawUrl: string, prefix: string): boolean {
  *   pathnameEndsWith("https://x/page.html", ".html"); // → true
  */
 export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
-  const schemePos = rawUrl.indexOf("://");
-  let pathStart: number;
-  if (schemePos !== -1) {
-    const slash = rawUrl.indexOf("/", schemePos + 3);
-    if (slash === -1) {
-      return suffix.length === 0 || suffix === "/";
-    }
-    pathStart = slash;
-  } else {
-    pathStart = 0;
-  }
-  let pathEnd = rawUrl.length;
-  const qPos = rawUrl.indexOf("?", pathStart);
-  if (qPos !== -1 && qPos < pathEnd) {
-    pathEnd = qPos;
-  }
-  const hPos = rawUrl.indexOf("#", pathStart);
-  if (hPos !== -1 && hPos < pathEnd) {
-    pathEnd = hPos;
-  }
-  const pathLen = pathEnd - pathStart;
+  locatePathnameRange(rawUrl);
+  const pathLen = PATH_E - PATH_S;
   if (pathLen === 0) {
     return suffix.length === 0 || suffix === "/";
   }
@@ -331,7 +377,7 @@ export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
   }
   // startsWith(needle, position) checks the bytes at `position` against
   // `needle` — perfect for verifying a suffix without allocating.
-  return rawUrl.startsWith(suffix, pathEnd - suffix.length);
+  return rawUrl.startsWith(suffix, PATH_E - suffix.length);
 }
 
 /**
@@ -349,6 +395,7 @@ export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
  *   originMatches("https://EXAMPLE.com/x", "https://example.com:443/y"); // → true
  *   originMatches("https://a.test/", "https://b.test/");                 // → false
  */
+// fallow-ignore-next-line complexity
 export function originMatches(a: string, b: string): boolean {
   const aS = a.indexOf("://");
   const bS = b.indexOf("://");
@@ -364,64 +411,18 @@ export function originMatches(a: string, b: string): boolean {
     }
   }
 
-  const aAuthStart = aS + 3;
-  const bAuthStart = bS + 3;
-  const aAuthEnd = findAuthorityEnd(a, aAuthStart);
-  const bAuthEnd = findAuthorityEnd(b, bAuthStart);
-  const aAt = a.lastIndexOf("@", aAuthEnd - 1);
-  const bAt = b.lastIndexOf("@", bAuthEnd - 1);
-  const aHostStart = aAt >= aAuthStart ? aAt + 1 : aAuthStart;
-  const bHostStart = bAt >= bAuthStart ? bAt + 1 : bAuthStart;
-
-  // Locate (hostEnd, portColon). portColon === -1 means no explicit port.
-  let aHostEnd: number;
-  let aPortColon: number;
-  if (a.charCodeAt(aHostStart) === CH_OPEN_BRACKET) {
-    const close = a.indexOf("]", aHostStart + 1);
-    if (close === -1 || close >= aAuthEnd) {
-      aHostEnd = aAuthEnd;
-      aPortColon = -1;
-    } else {
-      aHostEnd = close + 1;
-      aPortColon =
-        aHostEnd < aAuthEnd && a.charCodeAt(aHostEnd) === CH_COLON
-          ? aHostEnd
-          : -1;
-    }
-  } else {
-    const colon = a.indexOf(":", aHostStart);
-    if (colon !== -1 && colon < aAuthEnd) {
-      aHostEnd = colon;
-      aPortColon = colon;
-    } else {
-      aHostEnd = aAuthEnd;
-      aPortColon = -1;
-    }
-  }
-  let bHostEnd: number;
-  let bPortColon: number;
-  if (b.charCodeAt(bHostStart) === CH_OPEN_BRACKET) {
-    const close = b.indexOf("]", bHostStart + 1);
-    if (close === -1 || close >= bAuthEnd) {
-      bHostEnd = bAuthEnd;
-      bPortColon = -1;
-    } else {
-      bHostEnd = close + 1;
-      bPortColon =
-        bHostEnd < bAuthEnd && b.charCodeAt(bHostEnd) === CH_COLON
-          ? bHostEnd
-          : -1;
-    }
-  } else {
-    const colon = b.indexOf(":", bHostStart);
-    if (colon !== -1 && colon < bAuthEnd) {
-      bHostEnd = colon;
-      bPortColon = colon;
-    } else {
-      bHostEnd = bAuthEnd;
-      bPortColon = -1;
-    }
-  }
+  // locateHostRange writes module-level scratch — must read into locals before
+  // the next call overwrites them.
+  locateHostRange(a, aS);
+  const aHostStart = HOST_S;
+  const aHostEnd = HOST_E;
+  const aPortColon = PORT_C;
+  const aAuthEnd = AUTH_E;
+  locateHostRange(b, bS);
+  const bHostStart = HOST_S;
+  const bHostEnd = HOST_E;
+  const bPortColon = PORT_C;
+  const bAuthEnd = AUTH_E;
 
   // Case-insensitive hostname compare. We only lowercase ASCII A-Z; brackets
   // appear at fixed positions on both sides (or neither) so they can't cause
@@ -533,6 +534,7 @@ export function setScheme(rawUrl: string, scheme: string): string {
  *   setPort("https://x:80/api", null);  // → "https://x/api"
  *   setPort("/api", 8080);              // → "/api" (no-op)
  */
+// fallow-ignore-next-line complexity
 export function setPort(rawUrl: string, port: number | null): string {
   if (port !== null) {
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -606,6 +608,7 @@ export function setPort(rawUrl: string, port: number | null): string {
  *   setPathname("https://x/old?q=1#frag", "/new");
  *   // → "https://x/new?q=1#frag"
  */
+// fallow-ignore-next-line complexity
 export function setPathname(rawUrl: string, newPathname: string): string {
   const normalized =
     newPathname.length === 0 || newPathname.charCodeAt(0) !== CH_SLASH

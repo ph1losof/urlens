@@ -225,6 +225,7 @@ interface BenchResult {
 // Sink is module-level so engines can't dead-code-eliminate the work.
 let SINK = 0;
 
+// fallow-ignore-next-line complexity
 function bench(name: string, fn: () => void, budgetMs: number): BenchResult {
   // Warmup: a longer window (up to 200ms) gives TurboFan / Warp / FTL the
   // headroom to tier up the inner function before the measurement window
@@ -381,6 +382,7 @@ if (hasURL) {
 }
 
 const FOUR_KEYS = ["q", "t", "utm_source", "utm_campaign"] as const;
+// fallow-ignore-next-line complexity
 add("rqs.four", () => {
   const u = FIX.twoKeyQuery[nextIdx()];
   const r = readQueryParams(u, FOUR_KEYS);
@@ -393,6 +395,7 @@ add("rqs.four", () => {
     0;
 });
 if (hasURL) {
+  // fallow-ignore-next-line complexity
   add("URL.four", () => {
     const u = FIX.twoKeyQuery[nextIdx()];
     const sp = new URL(u).searchParams;

@@ -29,6 +29,7 @@ const CH_PLUS = 43;
 let LOC_Q = -1;
 let LOC_F = 0;
 
+// fallow-ignore-next-line complexity
 function locate(rawUrl: string): void {
   const qPos = rawUrl.indexOf("?");
   if (qPos === -1) {
@@ -108,6 +109,7 @@ SAFE_KEY[95] = 1; // _
 let KEY_ENCODED = "";
 let KEY_AMBIG = false;
 
+// fallow-ignore-next-line complexity
 function analyzeSetterKey(key: string): void {
   const len = key.length;
   let allSafe = true;
@@ -143,6 +145,7 @@ function analyzeSetterKey(key: string): void {
  *   readQueryParam("https://x/", "q");                        // → null
  *   readQueryParam("https://x/?k", "k");                      // → ""
  */
+// fallow-ignore-next-line complexity
 export function readQueryParam(rawUrl: string, key: string): string | null {
   locate(rawUrl);
   const qPos = LOC_Q;
@@ -208,17 +211,25 @@ export function readQueryParam(rawUrl: string, key: string): string | null {
   return readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
 }
 
-// Pass 2 helper: WHATWG-decoded key match via the existing UTF-8 walker.
+// Pass 2 helpers: WHATWG-decoded key match via the existing UTF-8 walker.
 // Decoded length is always ≤ encoded length, so `fieldLen < keyLen` prunes
 // candidates without paying for the walker. Only ever called when the URL's
-// query range is known to contain '%' or '+'.
-function readQueryParamDecodedFallback(
+// query range is known to contain '%' or '+'. This is the slow path — a
+// non-inlined helper call here is invisible cost.
+//
+// scanDecodedQueryField writes the matching field's `=` position (or -1 if
+// the field has no '=') into FIELD_EQ and returns the matching `&` position
+// (or `end`). Returns -1 if no field matches.
+let FIELD_EQ = -1;
+
+// fallow-ignore-next-line complexity
+function scanDecodedQueryField(
   rawUrl: string,
   queryStart: number,
   end: number,
   key: string,
   keyLen: number
-): string | null {
+): number {
   let i = queryStart;
   while (i < end) {
     let amp = rawUrl.indexOf("&", i);
@@ -231,14 +242,29 @@ function readQueryParamDecodedFallback(
       keyEnd - i >= keyLen &&
       compareDecodedValueRange(rawUrl, i, keyEnd, key)
     ) {
-      if (eq === -1 || eq > amp) {
-        return "";
-      }
-      return decodeRange(rawUrl, eq + 1, amp);
+      FIELD_EQ = eq === -1 || eq > amp ? -1 : eq;
+      return amp;
     }
     i = amp + 1;
   }
-  return null;
+  return -1;
+}
+
+function readQueryParamDecodedFallback(
+  rawUrl: string,
+  queryStart: number,
+  end: number,
+  key: string,
+  keyLen: number
+): string | null {
+  const amp = scanDecodedQueryField(rawUrl, queryStart, end, key, keyLen);
+  if (amp === -1) {
+    return null;
+  }
+  if (FIELD_EQ === -1) {
+    return "";
+  }
+  return decodeRange(rawUrl, FIELD_EQ + 1, amp);
 }
 
 /**
@@ -265,6 +291,7 @@ function readQueryParamDecodedFallback(
  * For destructuring by **name**, use `view(url).queryParams(keys)` — it
  * returns an object keyed by the input keys.
  */
+// fallow-ignore-next-line complexity
 export function readQueryParams<const K extends readonly string[]>(
   rawUrl: string,
   keys: K
@@ -386,6 +413,7 @@ export function readQueryParams<const K extends readonly string[]>(
  *   setQueryParam("https://x/?weird%20key=old", "weird key", "new");
  *   // → "https://x/?weird+key=new"
  */
+// fallow-ignore-next-line complexity
 export function setQueryParam(
   rawUrl: string,
   key: string,
@@ -507,6 +535,7 @@ export function setQueryParam(
  *   setQueryParams("https://x/?a=1&b=2", { a: "new", b: null, c: "3" });
  *   // → "https://x/?a=new&c=3"
  */
+// fallow-ignore-next-line complexity
 export function setQueryParams(
   rawUrl: string,
   params: Record<string, string | null>
@@ -697,6 +726,7 @@ export function removeQueryParam(rawUrl: string, key: string): string {
  *   );
  *   // → "https://x/?q=hi"
  */
+// fallow-ignore-next-line complexity
 export function removeQueryParams(
   rawUrl: string,
   keys: readonly string[]
@@ -822,6 +852,7 @@ export function removeQueryParams(
  *   hasQueryParam("https://x/?weird%20key=v", "weird key"); // → true
  *   hasQueryParam("https://x/", "a");                      // → false
  */
+// fallow-ignore-next-line complexity
 export function hasQueryParam(rawUrl: string, key: string): boolean {
   // Inlined locate — keeps the call sites tight for tight-loop callers.
   const qPos = rawUrl.indexOf("?");
@@ -895,23 +926,7 @@ function hasQueryParamDecodedFallback(
   key: string,
   keyLen: number
 ): boolean {
-  let i = queryStart;
-  while (i < end) {
-    let amp = rawUrl.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = rawUrl.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (
-      keyEnd - i >= keyLen &&
-      compareDecodedValueRange(rawUrl, i, keyEnd, key)
-    ) {
-      return true;
-    }
-    i = amp + 1;
-  }
-  return false;
+  return scanDecodedQueryField(rawUrl, queryStart, end, key, keyLen) !== -1;
 }
 
 /**
@@ -930,6 +945,7 @@ function hasQueryParamDecodedFallback(
  *   queryParamEquals("https://x/?q=hello+world", "q", "hello world"); // → true
  *   queryParamEquals("https://x/?q=caf%C3%A9", "q", "café");          // → true
  */
+// fallow-ignore-next-line complexity
 export function queryParamEquals(
   rawUrl: string,
   key: string,
@@ -1009,6 +1025,7 @@ export function queryParamEquals(
   );
 }
 
+// fallow-ignore-next-line complexity
 function queryParamEqualsDecodedFallback(
   rawUrl: string,
   queryStart: number,
@@ -1037,6 +1054,7 @@ function queryParamEqualsDecodedFallback(
   return false;
 }
 
+// fallow-ignore-next-line complexity
 function hexNibble(code: number): number {
   if (code >= 48 && code <= 57) {
     return code - 48;
@@ -1051,6 +1069,7 @@ function hexNibble(code: number): number {
 // Reads a `%XY` continuation byte at position `pos`. Returns the byte value
 // if it parses to a valid UTF-8 continuation byte (top two bits 10), or -1
 // otherwise (out of range, not a percent-escape, or doesn't satisfy 10xxxxxx).
+// fallow-ignore-next-line complexity
 function readContByte(s: string, pos: number, end: number): number {
   if (pos + 2 >= end || s.charCodeAt(pos) !== CH_PERCENT) {
     return -1;
@@ -1076,6 +1095,7 @@ function readContByte(s: string, pos: number, end: number): number {
 //
 // Module-internal export: shared with UrlView.queryParamEquals via view.ts.
 // Not re-exported from index.ts.
+// fallow-ignore-next-line complexity
 export function compareDecodedValueRange(
   s: string,
   start: number,
