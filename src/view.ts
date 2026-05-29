@@ -318,14 +318,15 @@ export class UrlView {
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
 
     // Pack (firstChar << 16 | length) per key — inner-loop prefilter is one
-    // int compare instead of two array reads + two compares.
+    // int compare instead of two array reads + two compares. The `-1`
+    // sentinel marks a slot as resolved: it can't equal a non-negative
+    // fieldPacked, so the same prefilter check skips found keys without a
+    // separate `found[]` allocation.
     const keyPacked: number[] = new Array(n);
     const keyAmbig: boolean[] = new Array(n);
-    const found: boolean[] = new Array(n);
     for (let k = 0; k < n; k++) {
       keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
       keyAmbig[k] = keyIsAmbiguous(keys[k]);
-      found[k] = false;
     }
 
     // Pass 1: byte-strict, with verification for ambiguous keys.
@@ -341,9 +342,6 @@ export class UrlView {
       const fieldPacked = raw.charCodeAt(i) * 65536 + (keyEnd - i);
 
       for (let k = 0; k < n; k++) {
-        if (found[k]) {
-          continue;
-        }
         if (keyPacked[k] !== fieldPacked) {
           continue;
         }
@@ -354,7 +352,7 @@ export class UrlView {
           ) {
             (out as Record<string, string | null>)[keys[k]] =
               eq === -1 || eq > amp ? "" : decodeRange(raw, eq + 1, amp);
-            found[k] = true;
+            keyPacked[k] = -1;
             remaining--;
           }
         }
@@ -376,7 +374,7 @@ export class UrlView {
         const keyEnd = eq === -1 || eq > amp ? amp : eq;
         const fieldLen = keyEnd - j;
         for (let k = 0; k < n; k++) {
-          if (found[k]) {
+          if (keyPacked[k] === -1) {
             continue;
           }
           if (fieldLen < keys[k].length) {
@@ -385,7 +383,7 @@ export class UrlView {
           if (compareDecodedValueRange(raw, j, keyEnd, keys[k])) {
             (out as Record<string, string | null>)[keys[k]] =
               eq === -1 || eq > amp ? "" : decodeRange(raw, eq + 1, amp);
-            found[k] = true;
+            keyPacked[k] = -1;
             remaining--;
           }
         }

@@ -350,10 +350,9 @@ export function readQueryParams<const K extends readonly string[]>(
     const fieldPacked = rawUrl.charCodeAt(i) * 65536 + (keyEnd - i);
 
     for (let k = 0; k < n; k++) {
-      if (out[k] !== null) {
-        continue;
-      }
       if (keyPacked[k] !== fieldPacked) {
+        // Also skips already-found slots: those are marked with the -1
+        // sentinel below, which can't match a non-negative fieldPacked.
         continue;
       }
       if (rawUrl.startsWith(keys[k], i)) {
@@ -363,6 +362,7 @@ export function readQueryParams<const K extends readonly string[]>(
         ) {
           out[k] =
             eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          keyPacked[k] = -1;
           remaining--;
         }
       }
@@ -384,7 +384,7 @@ export function readQueryParams<const K extends readonly string[]>(
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       const fieldLen = keyEnd - j;
       for (let k = 0; k < n; k++) {
-        if (out[k] !== null) {
+        if (keyPacked[k] === -1) {
           continue;
         }
         if (fieldLen < keys[k].length) {
@@ -393,6 +393,7 @@ export function readQueryParams<const K extends readonly string[]>(
         if (compareDecodedValueRange(rawUrl, j, keyEnd, keys[k])) {
           out[k] =
             eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          keyPacked[k] = -1;
           remaining--;
         }
       }
