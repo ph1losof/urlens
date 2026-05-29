@@ -9,6 +9,7 @@ import {
   findAuthorityEnd,
   findSchemeEnd,
   parsePortRange,
+  SCHEME_CONT,
 } from "./internal.js";
 
 // Module-level scratch slots — same allocation-free pattern as LOC_Q/LOC_F in
@@ -189,8 +190,30 @@ export function readOrigin(rawUrl: string): string {
  *   readScheme("/relative/path");      // → ""
  */
 export function readScheme(rawUrl: string): string {
-  const schemePos = findSchemeEnd(rawUrl);
-  return schemePos === -1 ? "" : rawUrl.substring(0, schemePos);
+  // Inlined findSchemeEnd: on SpiderMonkey the cross-module call costs more than
+  // the scan itself on this ultra-hot reader, so the validating pass lives here
+  // directly. Keep in sync with findSchemeEnd in internal.ts.
+  const c0 = rawUrl.charCodeAt(0) | 32;
+  if (c0 < 97 || c0 > 122) {
+    return "";
+  }
+  const len = rawUrl.length;
+  for (let i = 1; i < len; i++) {
+    const c = rawUrl.charCodeAt(i);
+    if (c >= 97 && c <= 122) {
+      continue;
+    }
+    if (c === CH_COLON) {
+      return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
+        rawUrl.charCodeAt(i + 2) === CH_SLASH
+        ? rawUrl.substring(0, i)
+        : "";
+    }
+    if (c > 127 || SCHEME_CONT[c] === 0) {
+      return "";
+    }
+  }
+  return "";
 }
 
 /**

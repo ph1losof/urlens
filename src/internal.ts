@@ -19,7 +19,7 @@ const CH_AT = 64;
 // "+" / "-" / ".". Indexed by char code; 1 = allowed, 0 = not. A single table
 // read per char beats a branch ladder of range/equality comparisons in the hot
 // scheme-detection path (see findSchemeEnd).
-const SCHEME_CONT = new Uint8Array(128);
+export const SCHEME_CONT = new Uint8Array(128);
 for (let c = 48 /* 0 */; c <= 57 /* 9 */; c++) {
   SCHEME_CONT[c] = 1;
 }
