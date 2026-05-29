@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readQueryParam } from "../src/query.js";
 import {
   hasScheme,
   originMatches,
@@ -586,5 +587,62 @@ describe("setPort", () => {
   test("accepts 0 and 65535", () => {
     expect(setPort("https://x.test/", 0)).toBe("https://x.test:0/");
     expect(setPort("https://x.test/", 65535)).toBe("https://x.test:65535/");
+  });
+});
+
+describe("scheme detection: embedded :// is not a scheme", () => {
+  // Regression: a schemeless/relative input whose query (or path/fragment)
+  // carries a URL must not have that embedded "://" read as its own scheme.
+  const u = "/callback?redirect_uri=https://app.example.com/cb&state=x";
+
+  test("relative input with :// in the query is schemeless", () => {
+    expect(readScheme(u)).toBe("");
+    expect(readPathname(u)).toBe("/callback");
+    expect(readOrigin(u)).toBe("");
+    expect(readHost(u)).toBe("");
+    expect(readHostname(u)).toBe("");
+    expect(readPort(u)).toBeNull();
+  });
+
+  test("query parsing on that input stays correct", () => {
+    expect(readQueryParam(u, "state")).toBe("x");
+    expect(readQueryParam(u, "redirect_uri")).toBe(
+      "https://app.example.com/cb"
+    );
+  });
+
+  test(":// inside a fragment is not a scheme", () => {
+    expect(readScheme("/p#x=a://b")).toBe("");
+    expect(readPathname("/p#x=a://b")).toBe("/p");
+  });
+
+  test(":// inside a relative path is not a scheme", () => {
+    expect(readScheme("/a/b://c")).toBe("");
+    expect(readPathname("/a/b://c")).toBe("/a/b://c");
+  });
+
+  test("leading :// has an empty scheme and is rejected", () => {
+    expect(readScheme("://x")).toBe("");
+  });
+
+  test("a space before :// is not a valid scheme", () => {
+    expect(readScheme("ht tp://x")).toBe("");
+  });
+
+  test("hasScheme is false for a relative input with :// in the query", () => {
+    expect(hasScheme("/cb?u=https://x", "https")).toBe(false);
+  });
+
+  test("a real scheme is still parsed when :// also appears in the query", () => {
+    const f = "https://a/p?u=x://y";
+    expect(readScheme(f)).toBe("https");
+    expect(readOrigin(f)).toBe("https://a");
+    expect(readPathname(f)).toBe("/p");
+    expect(hasScheme(f, "https")).toBe(true);
+  });
+
+  test("schemes with digits, +, -, . are accepted", () => {
+    expect(readScheme("a+b-c.d1://host/p")).toBe("a+b-c.d1");
+    expect(hasScheme("git+ssh://host/p", "git+ssh")).toBe(true);
   });
 });

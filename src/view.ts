@@ -1,11 +1,12 @@
 import { decodeRange } from "./decode.js";
 import {
-  AUTH_LAST_AT,
+  AUTH_PACK,
   CH_AMP,
   CH_COLON,
   CH_OPEN_BRACKET,
   findAuthorityEnd,
   findKeyMatch,
+  findSchemeEnd,
   parsePortRange,
 } from "./internal.js";
 import {
@@ -63,7 +64,7 @@ export class UrlView {
   // fallow-ignore-next-line complexity
   constructor(rawUrl: string) {
     const len = rawUrl.length;
-    const schemePos = rawUrl.indexOf("://");
+    const schemePos = findSchemeEnd(rawUrl);
 
     let hostStart: number;
     let hostEnd: number;
@@ -77,8 +78,9 @@ export class UrlView {
       authEnd = 0;
     } else {
       const authStart = schemePos + 3;
-      authEnd = findAuthorityEnd(rawUrl, authStart);
-      const at = AUTH_LAST_AT;
+      const packed = findAuthorityEnd(rawUrl, authStart);
+      authEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+      const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
       hostStart = at >= authStart ? at + 1 : authStart;
 
       if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {

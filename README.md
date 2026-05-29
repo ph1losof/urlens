@@ -320,6 +320,7 @@ What we **deliberately don't do** (the *"where it's pragmatic"* cut — these wo
 - **No IPv6 canonicalization** — we preserve the input's `[…]` byte form. `[2001:0db8::0001]` is not byte-equal to `[2001:db8::1]`.
 - **No path normalization** — `setPathname` doesn't collapse `..` / `.` segments.
 - **No scheme case-normalization on *read*** — `readScheme("HTTPS://x/")` returns `"HTTPS"`. (`hasScheme` and `originMatches` compare case-insensitively, so this doesn't affect comparison semantics.)
+- **Scheme detection validates the RFC alphabet** — a relative/schemeless input whose query, path, or fragment carries a `://` (e.g. an OAuth `redirect_uri` or proxy `?url=`) is correctly read as schemeless, not as having the embedded scheme. `readScheme("/cb?redirect_uri=https://app.example.com")` returns `""`, and `readPathname` returns `"/cb"`.
 
 The contract: **assume the input URL is already well-formed.** If it came from a browser, `fetch`, `URL`, or any WHATWG-conformant builder, it's already normalized — `urlens` reads and writes against it correctly without re-canonicalizing every byte. If you feed in raw user input, run it through `new URL(input).toString()` first to canonicalize.
 

@@ -1,5 +1,5 @@
 import {
-  AUTH_LAST_AT,
+  AUTH_PACK,
   CH_0,
   CH_9,
   CH_COLON,
@@ -7,6 +7,7 @@ import {
   CH_SLASH,
   defaultPortFor,
   findAuthorityEnd,
+  findSchemeEnd,
   parsePortRange,
 } from "./internal.js";
 
@@ -29,8 +30,9 @@ let AUTH_E = 0;
 // fallow-ignore-next-line complexity
 function locateHostRange(s: string, schemeEnd: number): void {
   const authStart = schemeEnd + 3;
-  const authEnd = findAuthorityEnd(s, authStart);
-  const at = AUTH_LAST_AT;
+  const packed = findAuthorityEnd(s, authStart);
+  const authEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authStart ? at + 1 : authStart;
   let hostEnd: number;
   let portColon: number;
@@ -66,7 +68,7 @@ function locateHostRange(s: string, schemeEnd: number): void {
 // branch — matching the original inlined behavior.
 // fallow-ignore-next-line complexity
 function locatePathnameRange(rawUrl: string): void {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   let pathStart: number;
   if (schemePos !== -1) {
     const slash = rawUrl.indexOf("/", schemePos + 3);
@@ -111,7 +113,7 @@ function locatePathnameRange(rawUrl: string): void {
  */
 // fallow-ignore-next-line complexity
 export function readPathname(rawUrl: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   let start: number;
   if (schemePos !== -1) {
     const slash = rawUrl.indexOf("/", schemePos + 3);
@@ -150,19 +152,20 @@ export function readPathname(rawUrl: string): string {
  *   // → "https://example.com:8080"
  */
 export function readOrigin(rawUrl: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return "";
   }
 
   const authorityStart = schemePos + 3;
-  const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
+  const packed = findAuthorityEnd(rawUrl, authorityStart);
+  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
 
   // Strip userinfo. Per WHATWG URL, a literal '@' inside userinfo must be
   // percent-encoded, so the LAST literal '@' within the authority terminates
-  // userinfo. lastIndexOf is bounded by authorityEnd-1. IPv6 hosts ('[::1]')
-  // cannot contain '@', so this is also correct for IPv6 without special casing.
-  const at = AUTH_LAST_AT;
+  // userinfo. IPv6 hosts ('[::1]') cannot contain '@', so this is also correct
+  // for IPv6 without special casing.
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   if (hostStart === authorityStart) {
@@ -186,7 +189,7 @@ export function readOrigin(rawUrl: string): string {
  *   readScheme("/relative/path");      // → ""
  */
 export function readScheme(rawUrl: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   return schemePos === -1 ? "" : rawUrl.substring(0, schemePos);
 }
 
@@ -206,13 +209,14 @@ export function readScheme(rawUrl: string): string {
  *   readHost("https://[::1]:8080/");             // → "[::1]:8080"
  */
 export function readHost(rawUrl: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return "";
   }
   const authorityStart = schemePos + 3;
-  const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = AUTH_LAST_AT;
+  const packed = findAuthorityEnd(rawUrl, authorityStart);
+  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
   return rawUrl.substring(hostStart, authorityEnd);
 }
@@ -228,13 +232,14 @@ export function readHost(rawUrl: string): string {
  */
 // fallow-ignore-next-line complexity
 export function readHostname(rawUrl: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return "";
   }
   const authorityStart = schemePos + 3;
-  const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = AUTH_LAST_AT;
+  const packed = findAuthorityEnd(rawUrl, authorityStart);
+  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
@@ -265,13 +270,14 @@ export function readHostname(rawUrl: string): string {
  */
 // fallow-ignore-next-line complexity
 export function readPort(rawUrl: string): number | null {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return null;
   }
   const authorityStart = schemePos + 3;
-  const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = AUTH_LAST_AT;
+  const packed = findAuthorityEnd(rawUrl, authorityStart);
+  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   let portStart: number;
@@ -325,7 +331,7 @@ export function readPort(rawUrl: string): number | null {
  *   hasScheme("ws://x/", "wss");        // → false
  */
 export function hasScheme(rawUrl: string, scheme: string): boolean {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos !== scheme.length) {
     return false;
   }
@@ -398,8 +404,8 @@ export function pathnameEndsWith(rawUrl: string, suffix: string): boolean {
  */
 // fallow-ignore-next-line complexity
 export function originMatches(a: string, b: string): boolean {
-  const aS = a.indexOf("://");
-  const bS = b.indexOf("://");
+  const aS = findSchemeEnd(a);
+  const bS = findSchemeEnd(b);
   if (aS === -1 || bS === -1 || aS !== bS) {
     return false;
   }
@@ -515,7 +521,7 @@ export function stripFragment(rawUrl: string): string {
  *   setScheme("/path", "https");                // → "/path" (no-op)
  */
 export function setScheme(rawUrl: string, scheme: string): string {
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return rawUrl;
   }
@@ -544,13 +550,14 @@ export function setPort(rawUrl: string, port: number | null): string {
       );
     }
   }
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return rawUrl;
   }
   const authorityStart = schemePos + 3;
-  const authorityEnd = findAuthorityEnd(rawUrl, authorityStart);
-  const at = AUTH_LAST_AT;
+  const packed = findAuthorityEnd(rawUrl, authorityStart);
+  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   // Locate existing port boundaries.
@@ -616,10 +623,11 @@ export function setPathname(rawUrl: string, newPathname: string): string {
       ? `/${newPathname}`
       : newPathname;
 
-  const schemePos = rawUrl.indexOf("://");
+  const schemePos = findSchemeEnd(rawUrl);
   let pathStart: number;
   if (schemePos !== -1) {
-    pathStart = findAuthorityEnd(rawUrl, schemePos + 3);
+    const packed = findAuthorityEnd(rawUrl, schemePos + 3);
+    pathStart = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
   } else {
     pathStart = 0;
   }

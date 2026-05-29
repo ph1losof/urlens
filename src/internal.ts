@@ -14,6 +14,75 @@ export const CH_AMP = 38;
 const CH_EQ = 61;
 const CH_AT = 64;
 
+// Lookup table for the "scheme continuation" alphabet: bytes that may legally
+// follow the leading letter of an RFC 3986 / WHATWG scheme — ALPHA / DIGIT /
+// "+" / "-" / ".". Indexed by char code; 1 = allowed, 0 = not. A single table
+// read per char beats a branch ladder of range/equality comparisons in the hot
+// scheme-detection path (see findSchemeEnd).
+const SCHEME_CONT = new Uint8Array(128);
+for (let c = 48 /* 0 */; c <= 57 /* 9 */; c++) {
+  SCHEME_CONT[c] = 1;
+}
+for (let c = 65 /* A */; c <= 90 /* Z */; c++) {
+  SCHEME_CONT[c] = 1;
+}
+for (let c = 97 /* a */; c <= 122 /* z */; c++) {
+  SCHEME_CONT[c] = 1;
+}
+SCHEME_CONT[43] = 1; // +
+SCHEME_CONT[45] = 1; // -
+SCHEME_CONT[46] = 1; // .
+
+// Returns the index of the scheme's "://" separator (which equals the scheme
+// length), or -1 when `rawUrl` has no valid scheme.
+//
+// A valid scheme is RFC 3986 / WHATWG: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+// Validating the full alphabet — not just "is there a '://'" — is what stops an
+// embedded "://" inside a query, path, or fragment (e.g. the redirect target in
+// "/cb?u=https://x") from being misread as the input's own scheme: any "/", "?",
+// "#", space, or other non-scheme byte before the "://" fails the scan and the
+// input is correctly reported as schemeless.
+//
+// Returns the same value the bare `indexOf("://")` returned on the happy path
+// (the index where "://" begins), so it is a drop-in for callers that branch on
+// `=== -1` and derive `authStart = schemeEnd + 3` / `substring(0, schemeEnd)`.
+//
+// Single forward pass: validate each byte against the scheme alphabet until we
+// reach the terminating ':' (which must be followed by "//"). Folding the search
+// and the validation into one loop is what keeps this off the critical path —
+// it never out-scans a bare `indexOf("://")` because it bails at the FIRST
+// non-scheme byte. For a schemeless input that opens with '/', '?', '#', etc.
+// (any relative path), that bail is at index 0, so the common "no scheme" answer
+// is O(1) instead of an indexOf scan over the whole string.
+export function findSchemeEnd(rawUrl: string): number {
+  // Scheme must start with a letter.
+  const c0 = rawUrl.charCodeAt(0) | 32; // ASCII-lowercase; NaN (empty) -> 32
+  if (c0 < 97 || c0 > 122) {
+    return -1;
+  }
+  const len = rawUrl.length;
+  for (let i = 1; i < len; i++) {
+    const c = rawUrl.charCodeAt(i);
+    // Fast path: lowercase ASCII letter — by far the most common scheme byte
+    // (http, https, ftp, ws, wss, file, ...). One range check, no table load.
+    if (c >= 97 && c <= 122) {
+      continue;
+    }
+    if (c === CH_COLON) {
+      // Scheme separator only if followed by "//"; otherwise no authority form
+      // (e.g. "mailto:foo") and we report schemeless, matching old indexOf.
+      return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
+        rawUrl.charCodeAt(i + 2) === CH_SLASH
+        ? i
+        : -1;
+    }
+    if (c > 127 || SCHEME_CONT[c] === 0) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
 // Finds the position of `key` as a complete query-string field name within
 // `rawUrl[start..end)`. Returns the index where `key` begins, or -1 if no
 // boundary-valid match exists.
@@ -74,21 +143,37 @@ export function findKeyMatch(
   return -1;
 }
 
-// Module-scope scalar updated by findAuthorityEnd: position of the LAST '@'
-// in the authority range, or -1 if absent. WHATWG userinfo terminates at the
-// LAST literal '@' (any '@' inside userinfo must be percent-encoded), so this
-// matches `lastIndexOf("@", authorityEnd - 1)` semantics, but is computed
-// inline as part of the existing authority scan — saving 8 callsites from a
-// separate scan whose backward range is wasted for URLs without userinfo.
-// Single-threaded JS guarantees reading this immediately after the call is safe.
-// biome-ignore lint/style/useConst: written by findAuthorityEnd; read by callers
-export let AUTH_LAST_AT = -1;
+// Multiplier used to pack two authority offsets into one return value (see
+// findAuthorityEnd). Both packed offsets are in [0, len], so the encoding stays
+// exact within Number.MAX_SAFE_INTEGER (2^53) as long as len < 2^21 (~2M chars)
+// — far beyond any realistic URL.
+//
+// 2^21 (not a larger power) is deliberate: the packed value must stay a V8 Smi
+// (31-bit, < 2^30) to keep the call-site decode in fast integer arithmetic. A
+// URL with userinfo packs `(lastAt + 1) * AUTH_PACK + authEnd`; with 2^21 that
+// stays a Smi whenever the terminating '@' sits within the first ~512 chars
+// (i.e. always, in practice). A bigger multiplier (e.g. 2^26) boxes those URLs
+// into a HeapNumber and the `%`/`/` decode falls back to slow double math.
+export const AUTH_PACK = 0x200000; // 2^21
 
-// Returns the index of the first '/', '?', or '#' at or after `start`, or the
-// string length if none are present. One linear pass — faster than three
-// separate indexOf calls when the authority is short, and never worse.
-// Also writes AUTH_LAST_AT with the position of the last '@' seen in
-// [start, returned-index) — see the AUTH_LAST_AT comment above.
+// Returns the authority boundary AND the last-'@' position packed into one
+// integer, computed in a single linear pass:
+//
+//   packed = (lastAt + 1) * AUTH_PACK + authEnd
+//
+//   • authEnd: index of the first '/', '?', or '#' at or after `start`, or the
+//     string length if none are present. One pass beats three separate indexOf
+//     calls when the authority is short, and is never worse.
+//   • lastAt: position of the LAST '@' in [start, authEnd), or -1 if absent.
+//     WHATWG userinfo terminates at the last literal '@' (an '@' inside userinfo
+//     must be percent-encoded), so this matches lastIndexOf("@", authEnd - 1)
+//     but is folded into this scan — avoiding a second backward scan whose range
+//     is wasted for the common URLs that have no userinfo.
+//
+// Decode at the call site (the quotient `lastAt + 1` is < 2^21, so `| 0` is a
+// safe 32-bit truncation; never apply bitwise ops to the full packed value):
+//   const authEnd = packed % AUTH_PACK;
+//   const lastAt  = ((packed / AUTH_PACK) | 0) - 1;
 // fallow-ignore-next-line complexity
 export function findAuthorityEnd(rawUrl: string, start: number): number {
   const len = rawUrl.length;
@@ -96,15 +181,13 @@ export function findAuthorityEnd(rawUrl: string, start: number): number {
   for (let i = start; i < len; i++) {
     const c = rawUrl.charCodeAt(i);
     if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
-      AUTH_LAST_AT = lastAt;
-      return i;
+      return (lastAt + 1) * AUTH_PACK + i;
     }
     if (c === CH_AT) {
       lastAt = i;
     }
   }
-  AUTH_LAST_AT = lastAt;
-  return len;
+  return (lastAt + 1) * AUTH_PACK + len;
 }
 
 // Returns the WHATWG default port for a "special" scheme: http=80, https=443,

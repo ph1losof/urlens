@@ -493,3 +493,24 @@ describe("UrlView edge cases", () => {
     expect(v.query()).toBe("");
   });
 });
+
+describe("UrlView scheme detection: embedded :// is not a scheme", () => {
+  test("relative input with :// in the query is schemeless", () => {
+    const v = view("/callback?redirect_uri=https://app.example.com/cb&state=x");
+    expect(v.scheme()).toBe("");
+    expect(v.pathname()).toBe("/callback");
+    expect(v.origin()).toBe("");
+    expect(v.host()).toBe("");
+    expect(v.hostname()).toBe("");
+    expect(v.port()).toBeNull();
+    expect(v.queryParam("state")).toBe("x");
+    expect(v.queryParam("redirect_uri")).toBe("https://app.example.com/cb");
+  });
+
+  test("a real scheme is still parsed when :// also appears in the query", () => {
+    const v = view("https://a/p?u=x://y");
+    expect(v.scheme()).toBe("https");
+    expect(v.origin()).toBe("https://a");
+    expect(v.pathname()).toBe("/p");
+  });
+});
