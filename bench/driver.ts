@@ -45,7 +45,7 @@ const engines: EngineLabel[] = [
 // Run all three engines concurrently — they're fully independent and the
 // inner page.evaluate is the dominant cost. Collect each engine's output
 // into a buffer so the printed blocks stay grouped instead of interleaving.
-async function runEngine({ name, launcher }: EngineLabel): Promise<string> {
+async function runEngine({ launcher }: EngineLabel): Promise<string> {
   const browser = await launcher.launch();
   try {
     const ctx = await browser.newContext();
