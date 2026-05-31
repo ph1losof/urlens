@@ -238,39 +238,39 @@ Real browser engines via Playwright, 600ms per case, inputs rotated through 8 di
 
 | case | V8 (Chrome) | SpiderMonkey (Firefox) | JSC (WebKit) |
 |---|---|---|---|
-| read query, plain ASCII | 20.3× | 16.1× | 24.9× |
-| read query, percent-encoded UTF-8 | 7.2× | 20.0× | 9.7× |
-| read query, 12 params, key near end | 84.4× | 29.2× | 51.0× |
-| read query, key absent (miss path) | 30.6× | 26.8× | 19.5× |
-| read query, encoded URL key (decoded match) | 10.7× | 11.6× | 10.4× |
-| read 2 keys (`readQueryParams`) | 6.6× | 7.4× | 7.5× |
-| read 4 keys (`readQueryParams`) | 4.3× | 5.3× | 5.7× |
-| read pathname (full URL) | 19.6× | 24.3× | 8.3× |
-| read pathname (path-only) | 21.7× | 56.2× | 17.2× |
-| read origin | 13.6× | 33.2× | 22.0× |
-| read scheme | 21.0× | 46.1× | 20.7× |
-| read host | 7.7× | 23.4× | 10.8× |
-| read hostname | 4.2× | 19.6× | 8.3× |
-| read port | 7.5× | 21.2× | 9.4× |
-| set query (replace) | 12.5× | 14.9× | 20.1× |
-| set query (append) | 13.0× | 16.2× | 21.6× |
-| set query (delete) | 14.2× | 16.7× | 19.6× |
-| set pathname | 9.0× | 32.1× | 12.6× |
-| `hasQueryParam` | 49.9× | 58.3× | 39.8× |
-| `queryParamEquals` (ASCII fast path) | 22.1× | 30.6× | 22.0× |
-| `pathnameStartsWith` | 8.6× | 23.8× | 8.6× |
-| `originMatches` | 10.7× | 24.1× | 14.4× |
-| read fragment | 18.3× | 68.3× | 18.6× |
-| set port | 10.1× | 20.4× | 11.6× |
-| `view().pathname()` vs flat `readPathname` (1 read) | 0.5× | 0.6× | 0.7× |
-| `view()` 5 reads vs flat 5 reads | 1.7× | 1.6× | 1.6× |
-| `view()` 5 reads vs `new URL()` + 5 props | 6.7× | 13.4× | 5.7× |
-| `view().queryParam()` vs flat `readQueryParam` | 0.9× | 0.6× | 0.6× |
-| `view().queryParams()` vs `readQueryParams` (2 keys) | 0.7× | 0.8× | 0.8× |
-| `removeQueryParam` vs `setQueryParam(…, null)` | 0.8× | 1.1× | 1.0× |
-| `removeQueryParams` (bulk) vs N sequential | 1.4× | 1.5× | 2.3× |
+| read query, plain ASCII | 18.6× | 19.0× | 23.4× |
+| read query, percent-encoded UTF-8 | 3.7× | 15.0× | 6.3× |
+| read query, 12 params, key near end | 115.7× | 26.8× | 39.2× |
+| read query, key absent (miss path) | 25.0× | 10.9× | 18.4× |
+| read query, encoded URL key (decoded match) | 10.8× | 10.3× | 9.1× |
+| read 2 keys (`readQueryParams`) | 5.6× | 7.9× | 9.1× |
+| read 4 keys (`readQueryParams`) | 2.9× | 4.8× | 5.0× |
+| read pathname (full URL) | 10.3× | 22.7× | 9.8× |
+| read pathname (path-only) | 27.7× | 62.9× | 20.2× |
+| read origin | 19.7× | 33.5× | 27.6× |
+| read scheme | 19.3× | 56.3× | 14.5× |
+| read host | 8.5× | 25.2× | 8.7× |
+| read hostname | 5.9× | 11.7× | 8.8× |
+| read port | 6.0× | 19.3× | 6.6× |
+| set query (replace) | 16.5× | 21.3× | 29.7× |
+| set query (append) | 8.6× | 13.2× | 19.8× |
+| set query (delete) | 12.2× | 30.4× | 24.4× |
+| set pathname | 9.0× | 31.8× | 14.9× |
+| `hasQueryParam` | 25.6× | 79.0× | 41.5× |
+| `queryParamEquals` (ASCII fast path) | 16.2× | 23.0× | 30.6× |
+| `pathnameStartsWith` | 7.7× | 16.2× | 5.8× |
+| `originMatches` | 8.1× | 20.8× | 12.0× |
+| read fragment | 20.1× | 76.5× | 15.5× |
+| set port | 8.9× | 32.5× | 10.6× |
+| `view().pathname()` vs flat `readPathname` (1 read) | 0.7× | 0.6× | 0.8× |
+| `view()` 5 reads vs flat 5 reads | 1.0× | 1.5× | 1.5× |
+| `view()` 5 reads vs `new URL()` + 5 props | 4.2× | 17.2× | 8.7× |
+| `view().queryParam()` vs flat `readQueryParam` | 0.4× | 0.3× | 2.3× |
+| `view().queryParams()` vs `readQueryParams` (2 keys) | 0.8× | 1.4× | 3.1× |
+| `removeQueryParam` vs `setQueryParam(…, null)` | 1.5× | 0.9× | 2.6× |
+| `removeQueryParams` (bulk) vs N sequential | 0.9× | 1.5× | 2.1× |
 
-Absolute throughput on the hot path: **~6.3M / ~4.1M / ~11.3M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
+Absolute throughput on the hot path: **~3.8M / ~2.7M / ~2.7M ops/s** for `readQueryParam` (V8 / SpiderMonkey / JSC) on the benchmark host.
 
 <!-- BENCH:END -->
 
