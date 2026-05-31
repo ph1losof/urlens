@@ -1,8 +1,8 @@
 # urlens
 
-Zero-allocation URL slicing — **5-73× faster than the native `URL` parser** on V8, SpiderMonkey, and JavaScriptCore.
+Zero-allocation URL slicing. **5-73× faster** than the native `URL` parser on V8, SpiderMonkey, and JSC.
 
-`urlens` reads, rewrites, and answers questions about URL strings via `indexOf` instead of constructing a `URL` object. For service workers, edge functions, request routers, and any hot path where you just need one query value, the pathname, or to check "does this URL have parameter X?", this is dramatically faster than `new URL()` / `URLSearchParams`. The predicate functions (`hasQueryParam`, `pathnameStartsWith`, `originMatches`, …) skip the string allocation entirely — they compare bytes in place against the input URL. Zero runtime dependencies.
+`urlens` uses `indexOf` against the raw URL string instead of building a `URL` object. When you only need one query value or the pathname, it's much cheaper than `new URL()` / `URLSearchParams`. The predicates (`hasQueryParam`, `pathnameStartsWith`, `originMatches`, …) don't allocate at all; they byte-compare against the input in place. No runtime dependencies.
 
 ## Install
 
@@ -139,7 +139,7 @@ encodeQueryComponent("hello world");               // → "hello+world"
 
 ## API
 
-**Predicates** — zero allocation, return `boolean`. Compare bytes in place; never construct an intermediate string.
+**Predicates** return `boolean` without allocating. They byte-compare against the input.
 
 | Function | Signature |
 |---|---|
@@ -186,7 +186,7 @@ encodeQueryComponent("hello world");               // → "hello+world"
 
 **Batched reads**
 
-`view(url)` pays one linear scan up front and caches every component boundary as an integer offset. Each method on the returned `UrlView` is a single `substring` (sliced-string view) against those offsets — no scanning. Use this when you need two or more components off the same URL string; for a single read, the flat top-level functions are strictly faster.
+`view(url)` does one linear scan up front and caches every component boundary as an integer offset. Subsequent reads off the returned `UrlView` are O(1) `substring` slices; no rescanning. Use it when you want two or more components off the same URL. For a single read, the flat functions are faster.
 
 | Function | Signature |
 |---|---|
@@ -216,22 +216,17 @@ encodeQueryComponent("hello world");               // → "hello+world"
 
 Notes:
 
-- **Predicates skip the string allocation entirely.** `hasQueryParam` answers in one query-string scan; `queryParamEquals` walks the URL's value bytes and decodes one Unicode codepoint at a time (1/2/3/4-byte UTF-8, astral surrogate pairs, and malformed sequences mapped to U+FFFD per WHATWG), comparing each against `expected` in place — zero allocation in all cases. The function is byte-equivalent to `readQueryParam(url, key) === expected` but never materializes a decoded string. `pathnameStartsWith` / `pathnameEndsWith` use native `String.prototype.startsWith` against the path range in place.
-- **`originMatches` infers implicit ports for special schemes** (http=80, https=443, ws=80, wss=443, ftp=21). `https://x/` and `https://x:443/` are considered equal. For non-special schemes (e.g. `custom://`) there is no implicit port — both sides must have the same explicit port (or both lack one).
-- `originMatches` compares **scheme + hostname case-insensitively** — `https://EXAMPLE.com/` matches `https://example.com/` and `[2001:DB8::1]` matches `[2001:db8::1]`. Userinfo is stripped from both sides.
-- **`hasScheme` is case-insensitive** — `hasScheme("HTTPS://x/", "https")` is true. URL schemes are case-insensitive per RFC; WHATWG normalizes them to lowercase.
-- **`encodeQueryComponent` is WHATWG `application/x-www-form-urlencoded`** — safe set is exactly `* - . _ 0-9 A-Z a-z`; spaces become `+`; everything else is percent-encoded. This differs from `encodeURIComponent`, which also leaves `! ' ( ) ~` unescaped.
-- `readQueryParams` returns a tuple positionally aligned with the input `keys` — pass keys with `as const` for full destructure-by-position typing. It scans the query string once and exits as soon as every requested key is found. For destructure-by-**name**, use `view(url).queryParams(keys)` instead — it returns an object keyed by the input keys.
-- **`view(url)`** trades one wrapper-object allocation for O(1) subsequent reads. Use it when you need ≥2 components off the same URL. For single reads, the flat top-level functions are strictly faster — they don't pay the wrapper cost.
-- `removeQueryParam` is a discoverability alias for `setQueryParam(url, key, null)`. `removeQueryParams` is a single-pass bulk form — strictly cheaper than calling `removeQueryParam` N times, which would rebuild the query string N times.
-- `setQueryParam(url, key, null)` removes the key. If the key has duplicates, the first occurrence is replaced and the rest are removed — matches `URLSearchParams.set`.
-- `setQueryParams` is a single-pass bulk setter. `null` in the dict removes the key. Keys not yet in the URL are appended at the end.
-- `setPathname` / `setPort` / `setScheme` preserve every other URL part (userinfo, fragment, IPv6 brackets, etc.). `setPort(url, null)` removes the port and its colon. `setPort` throws `RangeError` for non-integer or out-of-range ports.
-- `setScheme` and `setPort` are no-ops when the URL has no scheme — they don't synthesize one.
-- `readOrigin`, `readHost`, `readHostname`, `readPort`, `originMatches` all strip userinfo (`user:pass@`) and handle IPv6 bracketed hosts (`[::1]`).
-- `readScheme` returns the scheme without the trailing `:` (unlike `URL.protocol`). `readFragment` and `readQuery` strip the leading `#`/`?` (unlike `URL.hash`/`URL.search`).
-- `readHost` returns `hostname:port` if a port is present (canonical authority form, IPv6 brackets kept). `readHostname` returns the bare hostname with IPv6 brackets stripped. `readPort` returns a `number | null` — null when no explicit port is set or the port is malformed.
-- **Keys are matched per WHATWG `application/x-www-form-urlencoded`** — `+` decodes to space, percent-encoded UTF-8 is decoded, U+FFFD for malformed. A byte-strict pass runs first with near-zero overhead; the WHATWG-decoded fallback only fires when the byte-strict pass misses *and* the URL has `%`/`+` in the query. So `readQueryParam("https://x.test/?weird%20key=v", "weird key")` returns `"v"`.
+- `readScheme` returns the scheme without the trailing `:` (unlike `URL.protocol`). `readFragment` and `readQuery` strip the leading `#` / `?` (unlike `URL.hash` / `URL.search`).
+- `readHost` is `hostname:port` in canonical authority form, IPv6 brackets kept. `readHostname` strips the brackets. `readPort` returns `number | null`; null when no explicit port is set or the port is malformed.
+- `readOrigin`, `readHost`, `readHostname`, `readPort`, and `originMatches` strip userinfo (`user:pass@`) and handle IPv6 bracketed hosts (`[::1]`).
+- `setQueryParam(url, key, null)` deletes the key. With duplicates, the first is replaced and the rest are removed (matches `URLSearchParams.set`).
+- `setQueryParams` is a single-pass bulk setter. `null` in the dict removes the key; new keys are appended in iteration order.
+- `setPathname` / `setPort` / `setScheme` preserve every other URL part (userinfo, fragment, IPv6 brackets). `setPort(url, null)` removes the port and its colon. `setPort` throws `RangeError` for non-integer or out-of-range ports.
+- Query keys are matched per WHATWG `application/x-www-form-urlencoded`: `+` decodes to space, percent-encoded UTF-8 is decoded, U+FFFD for malformed. A byte-strict pass runs first; the decoded fallback only fires when byte-strict misses and the URL contains `%` / `+` in the query. So `readQueryParam("https://x.test/?weird%20key=v", "weird key")` returns `"v"`.
+- `hasScheme` and `originMatches` compare schemes and hostnames case-insensitively. `originMatches` also infers implicit ports for special schemes (http=80, https=443, ws=80, wss=443, ftp=21), so `https://x/` matches `https://x:443/`. Non-special schemes need an explicit port on both sides (or none).
+- `encodeQueryComponent` is `application/x-www-form-urlencoded`: safe set is `* - . _ 0-9 A-Z a-z`, spaces become `+`, everything else is percent-encoded. This differs from `encodeURIComponent`, which leaves `! ' ( ) ~` unescaped.
+- `readQueryParams` returns a tuple positionally aligned with the input `keys`; pass keys `as const` for full destructure-by-position typing. For destructure-by-name, use `view(url).queryParams(keys)`, which returns an object keyed by the input keys.
+- `removeQueryParam` is an alias for `setQueryParam(url, key, null)`. `removeQueryParams` is a single-pass bulk form; cheaper than N sequential calls, which would rebuild the query string N times.
 
 ## Benchmarks
 
@@ -282,53 +277,47 @@ Absolute throughput on the hot path: **~6.3M / ~4.1M / ~11.3M ops/s** for `readQ
 Run the bench yourself: `bun run bench`. To re-run and update this README in
 one shot (useful after a local change), use `bun run bench:update-readme`.
 
-## Zero-copy & zero-allocation guarantees
+## Allocation behavior
 
-Three tiers of allocation behavior, by function category:
+Predicates allocate nothing. They return `boolean` and byte-compare against the input. `queryParamEquals` implements WHATWG UTF-8 decoding inline (1/2/3/4-byte sequences, surrogate pairs, U+FFFD for malformed) so it never builds a decoded string.
 
-| Category | Allocation | Why |
-|---|---|---|
-| **Predicates** (`hasQueryParam`, `hasScheme`, `queryParamEquals`, `pathnameStartsWith`, `pathnameEndsWith`, `originMatches`) | **Truly zero allocation.** | They return `boolean`. No `substring`, no `+`, no `decodeQueryComponent`. Only `indexOf` / `lastIndexOf` / `startsWith` / `charCodeAt` against the input. `queryParamEquals` implements the WHATWG UTF-8 decoder algorithm inline with integer arithmetic — valid 1/2/3/4-byte sequences become codepoints, malformed sequences become U+FFFD per spec, surrogate pairs are compared two chars at a time against `expected`. Never builds a decoded string at any point. |
-| **Readers** (`readQueryParam`, `readPathname`, `readHost`, `readFragment`, …) | **Byte-level zero-copy** via "sliced strings". | V8, SpiderMonkey, and JavaScriptCore all implement `String.prototype.substring(start, end)` as a small header (≈24 bytes) pointing into the parent string's character storage — no characters are copied. The function returns a value of type `string`; the only allocation is the header itself. `decodeQueryComponent` allocates the decoded string only when the source contains `+` or `%`. |
-| **Setters** (`setQueryParam`, `setPathname`, `setPort`, `setScheme`, …) | **One output allocation, unavoidable.** | A new string must exist. The implementation minimizes intermediate work: a single `+=`/concat chain that V8/SM/JSC implement as a cons-string (rope), materialized at most once when the result is consumed or grows past the engine's flatten threshold. |
+Readers return sliced-string views. V8, SpiderMonkey, and JSC implement `String.prototype.substring` as a ~24-byte header pointing into the parent string's character storage, so `readQueryParam` allocates the header but never copies characters. `decodeQueryComponent` only allocates when the source contains `+` or `%`.
 
-The predicates were specifically designed to defeat the "read-then-compare" pattern. Where `readQueryParam(url, "q") === "x"` causes one sliced-string header allocation for the value, `queryParamEquals(url, "q", "x")` is zero-allocation regardless of encoding.
+Setters allocate exactly one output string. The `+=` / concat chain is held as a cons-string (rope) and flattened at most once, when consumed.
+
+`queryParamEquals(url, "q", "x")` exists because the read-then-compare equivalent (`readQueryParam(url, "q") === "x"`) still allocates a sliced-string header for the value. `queryParamEquals` walks the bytes and compares in place; no header.
 
 ## Why not `URL`?
 
-The WHATWG `URL` parser is correctness-first: it parses the entire URL, normalizes the host, builds a `URLSearchParams` map, and produces a complete object. That's the right design for general-purpose use. But on a hot request path where you just want one query value — or to flip a single UTM tag — the parser does ~95% of work you'll throw away.
+`URL` parses everything: it validates structure, normalizes the host, builds a `URLSearchParams` map. That's right for general-purpose use, but on a hot path where you only want one query value, you're paying for 95% you'll throw away. `urlens` slices out (or rewrites) just the part you ask for: reading one query value is one `indexOf` walk over the query string, reading the pathname or origin is two or three `indexOf` calls, setters return a new string and never mutate the input.
 
-`urlens` flips the priority: it does the minimum work to slice out (or rewrite) the requested part. Reading one query value walks the query string once with `indexOf`. Setting one query value walks it once and splices the result. Reading the pathname or origin is two-to-three `indexOf` calls. Setters return a new string; the input is never mutated.
-
-There are two real tradeoffs:
-
-1. **No validation.** `urlens` never throws on malformed input — it returns a best-effort substring. If a URL is structurally broken, `urlens` won't tell you.
-2. **`decodeQueryComponent` is tolerant.** Where `decodeURIComponent` throws on `%ZZ`, `urlens` preserves the literal text. This matches what most user-facing systems actually want.
+In exchange, `urlens` skips validation, and `decodeQueryComponent` is tolerant (where `decodeURIComponent` throws on `%ZZ`, `urlens` keeps the literal text). For untrusted input, round-trip through `new URL(input).toString()` first.
 
 ## WHATWG compliance
 
-`urlens` is **fully WHATWG-conformant on every operation it performs**. Where we have a corresponding `URL` / `URLSearchParams` operation we match its result byte-for-byte:
+Where `urlens` has a corresponding `URL` / `URLSearchParams` operation, the result matches byte-for-byte:
 
-- **Key matching** follows `application/x-www-form-urlencoded` decoding on both sides. `readQueryParam("?weird%20key=v", "weird key")` returns `"v"` — same as `URLSearchParams.get`. Byte-strict is tried first (near-zero overhead); the decoded fallback only fires when needed.
-- **Value decoding** is full WHATWG UTF-8 with U+FFFD replacement for malformed sequences (lone continuation bytes, overlong sequences, surrogate-range encodings).
-- **`encodeQueryComponent`** matches `application/x-www-form-urlencoded` exactly — safe set is `* - . _ 0-9 A-Z a-z`, spaces become `+`, everything else percent-encoded. Same output as `new URLSearchParams([[k, v]]).toString()`.
-- **`originMatches`** infers implicit ports for special schemes (http=80, https=443, ws=80, wss=443, ftp=21), compares schemes + hostnames case-insensitively, and strips userinfo from both sides — same semantics as `URL.origin === URL.origin`.
+- Key matching follows `application/x-www-form-urlencoded` on both sides. `readQueryParam("?weird%20key=v", "weird key")` returns `"v"`, same as `URLSearchParams.get`. Byte-strict runs first; the decoded fallback only fires when needed.
+- Value decoding is WHATWG UTF-8 with U+FFFD for malformed sequences (lone continuation bytes, overlong forms, surrogate-range encodings).
+- `encodeQueryComponent` matches `application/x-www-form-urlencoded` exactly: safe set is `* - . _ 0-9 A-Z a-z`, spaces become `+`, everything else percent-encoded. Same output as `new URLSearchParams([[k, v]]).toString()`.
+- `originMatches` infers implicit ports for special schemes (http=80, https=443, ws=80, wss=443, ftp=21), compares schemes and hostnames case-insensitively, and strips userinfo from both sides. Same semantics as `URL.origin === URL.origin`.
 
-What we **deliberately don't do** (the *"where it's pragmatic"* cut — these would require sizable code and constant per-call work for very rare wins):
+Scheme detection validates the full RFC alphabet, so a relative/schemeless input whose query, path, or fragment contains a `://` (an OAuth `redirect_uri`, a proxy `?url=`, etc.) is read as schemeless. `readScheme("/cb?redirect_uri=https://app.example.com")` returns `""`; `readPathname` returns `"/cb"`.
 
-- **No IDN / Punycode** — `xn--` ↔ Unicode hostname conversion. Browsers ship ~50KB of Unicode tables for this; we don't.
-- **No IPv6 canonicalization** — we preserve the input's `[…]` byte form. `[2001:0db8::0001]` is not byte-equal to `[2001:db8::1]`.
-- **No path normalization** — `setPathname` doesn't collapse `..` / `.` segments.
-- **No scheme case-normalization on *read*** — `readScheme("HTTPS://x/")` returns `"HTTPS"`. (`hasScheme` and `originMatches` compare case-insensitively, so this doesn't affect comparison semantics.)
-- **Scheme detection validates the RFC alphabet** — a relative/schemeless input whose query, path, or fragment carries a `://` (e.g. an OAuth `redirect_uri` or proxy `?url=`) is correctly read as schemeless, not as having the embedded scheme. `readScheme("/cb?redirect_uri=https://app.example.com")` returns `""`, and `readPathname` returns `"/cb"`.
+What `urlens` doesn't do:
 
-The contract: **assume the input URL is already well-formed.** If it came from a browser, `fetch`, `URL`, or any WHATWG-conformant builder, it's already normalized — `urlens` reads and writes against it correctly without re-canonicalizing every byte. If you feed in raw user input, run it through `new URL(input).toString()` first to canonicalize.
+- No IDN / Punycode (`xn--` ↔ Unicode hostname). Browsers ship ~50KB of Unicode tables for this.
+- No IPv6 canonicalization. `[2001:0db8::0001]` is preserved verbatim and isn't byte-equal to `[2001:db8::1]`.
+- No path normalization. `setPathname` doesn't collapse `..` / `.` segments.
+- No scheme case-normalization on read. `readScheme("HTTPS://x/")` returns `"HTTPS"`. (`hasScheme` and `originMatches` still compare case-insensitively.)
+
+Assume the input is already well-formed. URLs from `fetch`, `URL.toString()`, or a browser are already normalized. For raw user input, run `new URL(input).toString()` first.
 
 ## Limitations
 
-- **No validation.** `urlens` never throws on malformed URLs — it returns best-effort substrings.
-- **No host validation.** `readOrigin` doesn't verify that the host is well-formed — it returns the substring between scheme and authority terminator.
-- **`setScheme` / `setPort` no-op on schemeless inputs.** They don't synthesize a scheme — pass a fully-qualified URL or build one with string concat first.
+- `urlens` never throws on malformed URLs. It returns best-effort substrings.
+- `readOrigin` doesn't validate the host. It returns whatever lies between the scheme and the authority terminator.
+- `setScheme` and `setPort` no-op on schemeless inputs. Build the URL with string concat first if you need to add a scheme.
 
 ## Development
 

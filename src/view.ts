@@ -11,9 +11,12 @@ import {
 } from "./internal.js";
 import {
   compareDecodedValueRange,
+  hasQueryParamDecodedFallback,
   keyIsAmbiguous,
   queryHasEncoding,
-} from "./query.js";
+  queryParamDecodedFallback,
+  queryParamEqualsDecodedFallback,
+} from "./query-scan.js";
 
 /**
  * A precomputed view over a URL string.
@@ -553,87 +556,6 @@ export class UrlView {
     }
     return this._raw.startsWith(suffix, end - suffix.length);
   }
-}
-
-// Module-level fallbacks — used by UrlView's query methods only when the
-// fast path misses and the URL has '%' or '+' in the query. Mirror the
-// helpers in query.ts; kept private to this module.
-
-// fallow-ignore-next-line complexity
-function queryParamDecodedFallback(
-  raw: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number
-): string | null {
-  let i = queryStart;
-  while (i < end) {
-    let amp = raw.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = raw.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
-      if (eq === -1 || eq > amp) {
-        return "";
-      }
-      return decodeRange(raw, eq + 1, amp);
-    }
-    i = amp + 1;
-  }
-  return null;
-}
-
-// fallow-ignore-next-line complexity
-function hasQueryParamDecodedFallback(
-  raw: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number
-): boolean {
-  let i = queryStart;
-  while (i < end) {
-    let amp = raw.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = raw.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
-      return true;
-    }
-    i = amp + 1;
-  }
-  return false;
-}
-
-// fallow-ignore-next-line complexity
-function queryParamEqualsDecodedFallback(
-  raw: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number,
-  expected: string
-): boolean {
-  let i = queryStart;
-  while (i < end) {
-    let amp = raw.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = raw.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (keyEnd - i >= keyLen && compareDecodedValueRange(raw, i, keyEnd, key)) {
-      const valStart = eq === -1 || eq > amp ? amp : eq + 1;
-      return compareDecodedValueRange(raw, valStart, amp, expected);
-    }
-    i = amp + 1;
-  }
-  return false;
 }
 
 /**

@@ -9,7 +9,6 @@ import {
   findAuthorityEnd,
   findSchemeEnd,
   parsePortRange,
-  SCHEME_CONT,
 } from "./internal.js";
 
 // Module-level scratch slots — same allocation-free pattern as LOC_Q/LOC_F in
@@ -67,6 +66,10 @@ function locateHostRange(s: string, schemeEnd: number): void {
 // scheme but no path slash (e.g. "https://x"), both slots are set to
 // rawUrl.length so callers see pathLen === 0 and fall into the implicit "/"
 // branch — matching the original inlined behavior.
+//
+// The indexOf("?") / indexOf("#") tail is inlined here even though setPathname
+// uses the same shape — extracting it as a helper regressed pss.full by ~5%
+// on JSC (a single-engine non-inlined call on this very hot path).
 // fallow-ignore-next-line complexity
 function locatePathnameRange(rawUrl: string): void {
   const schemePos = findSchemeEnd(rawUrl);
@@ -190,30 +193,8 @@ export function readOrigin(rawUrl: string): string {
  *   readScheme("/relative/path");      // → ""
  */
 export function readScheme(rawUrl: string): string {
-  // Inlined findSchemeEnd: on SpiderMonkey the cross-module call costs more than
-  // the scan itself on this ultra-hot reader, so the validating pass lives here
-  // directly. Keep in sync with findSchemeEnd in internal.ts.
-  const c0 = rawUrl.charCodeAt(0) | 32;
-  if (c0 < 97 || c0 > 122) {
-    return "";
-  }
-  const len = rawUrl.length;
-  for (let i = 1; i < len; i++) {
-    const c = rawUrl.charCodeAt(i);
-    if (c >= 97 && c <= 122) {
-      continue;
-    }
-    if (c === CH_COLON) {
-      return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
-        rawUrl.charCodeAt(i + 2) === CH_SLASH
-        ? rawUrl.substring(0, i)
-        : "";
-    }
-    if (c > 127 || SCHEME_CONT[c] === 0) {
-      return "";
-    }
-  }
-  return "";
+  const schemePos = findSchemeEnd(rawUrl);
+  return schemePos === -1 ? "" : rawUrl.substring(0, schemePos);
 }
 
 /**
@@ -221,10 +202,12 @@ export function readScheme(rawUrl: string): string {
  * present, or just `hostname` otherwise. IPv6 brackets are preserved
  * (`[::1]:8080`). Userinfo is stripped. Returns `""` if the input has no scheme.
  *
- * Note: each host reader (`readHost` / `readHostname` / `readPort`) duplicates
- * the authority-locating scan deliberately — sharing the scan via a helper
- * would allocate a returned tuple per call. For batched reads on one URL,
- * prefer {@link view}, which scans once and caches all offsets.
+ * Note: `readHost` and `readOrigin` keep the 4-line authority unpack inline
+ * (rather than delegating to `locateHostRange` like `readHostname`/`readPort`
+ * do) because they don't need the bracket/colon scan — the host range here is
+ * just `[hostStart, authorityEnd)`. Calling `locateHostRange` would add an
+ * unused `indexOf(":")` per call. For batched reads on one URL, prefer
+ * {@link view}, which scans once and caches all offsets.
  *
  * @example
  *   readHost("https://example.com:8080/p");      // → "example.com:8080"
@@ -253,29 +236,23 @@ export function readHost(rawUrl: string): string {
  *   readHostname("https://example.com:8080/p");  // → "example.com"
  *   readHostname("http://[::1]:8080/");          // → "::1"
  */
-// fallow-ignore-next-line complexity
 export function readHostname(rawUrl: string): string {
   const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return "";
   }
-  const authorityStart = schemePos + 3;
-  const packed = findAuthorityEnd(rawUrl, authorityStart);
-  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
-  const hostStart = at >= authorityStart ? at + 1 : authorityStart;
-
+  locateHostRange(rawUrl, schemePos);
+  const hostStart = HOST_S;
+  const hostEnd = HOST_E;
   if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
-    const closeBracket = rawUrl.indexOf("]", hostStart + 1);
-    if (closeBracket !== -1 && closeBracket < authorityEnd) {
-      return rawUrl.substring(hostStart + 1, closeBracket);
+    // Closed bracket: hostEnd points one past `]`, strip both. Malformed
+    // bracket: locateHostRange leaves hostEnd === authEnd with no `]` at the
+    // boundary; return the authority verbatim, matching the pre-dedup behavior.
+    if (rawUrl.charCodeAt(hostEnd - 1) === 93 /* ] */) {
+      return rawUrl.substring(hostStart + 1, hostEnd - 1);
     }
-    return rawUrl.substring(hostStart, authorityEnd);
+    return rawUrl.substring(hostStart, AUTH_E);
   }
-
-  const colonPos = rawUrl.indexOf(":", hostStart);
-  const hostEnd =
-    colonPos !== -1 && colonPos < authorityEnd ? colonPos : authorityEnd;
   return rawUrl.substring(hostStart, hostEnd);
 }
 
@@ -291,45 +268,22 @@ export function readHostname(rawUrl: string): string {
  *   readPort("http://example.com/");      // → null (no explicit port)
  *   readPort("http://example.com:abc/");  // → null (malformed)
  */
-// fallow-ignore-next-line complexity
 export function readPort(rawUrl: string): number | null {
   const schemePos = findSchemeEnd(rawUrl);
   if (schemePos === -1) {
     return null;
   }
-  const authorityStart = schemePos + 3;
-  const packed = findAuthorityEnd(rawUrl, authorityStart);
-  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
-  const hostStart = at >= authorityStart ? at + 1 : authorityStart;
-
-  let portStart: number;
-  if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
-    const closeBracket = rawUrl.indexOf("]", hostStart + 1);
-    if (closeBracket === -1 || closeBracket >= authorityEnd) {
-      return null;
-    }
-    const afterBracket = closeBracket + 1;
-    if (
-      afterBracket >= authorityEnd ||
-      rawUrl.charCodeAt(afterBracket) !== CH_COLON
-    ) {
-      return null;
-    }
-    portStart = afterBracket + 1;
-  } else {
-    const colonPos = rawUrl.indexOf(":", hostStart);
-    if (colonPos === -1 || colonPos >= authorityEnd) {
-      return null;
-    }
-    portStart = colonPos + 1;
+  locateHostRange(rawUrl, schemePos);
+  if (PORT_C === -1) {
+    return null;
   }
-
+  // Manual digit parse — inlined (a cross-module parsePortRange call regresses
+  // rport.full by ~4% on JSC despite identical instruction count).
+  const portStart = PORT_C + 1;
+  const authorityEnd = AUTH_E;
   if (portStart >= authorityEnd) {
     return null;
   }
-  // Manual digit parse: avoids `parseInt(substring(...))` (one allocation +
-  // global lookup) in favor of a tight loop with no allocations at all.
   let port = 0;
   for (let i = portStart; i < authorityEnd; i++) {
     const c = rawUrl.charCodeAt(i);
@@ -564,7 +518,6 @@ export function setScheme(rawUrl: string, scheme: string): string {
  *   setPort("https://x:80/api", null);  // → "https://x/api"
  *   setPort("/api", 8080);              // → "/api" (no-op)
  */
-// fallow-ignore-next-line complexity
 export function setPort(rawUrl: string, port: number | null): string {
   if (port !== null) {
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -577,31 +530,9 @@ export function setPort(rawUrl: string, port: number | null): string {
   if (schemePos === -1) {
     return rawUrl;
   }
-  const authorityStart = schemePos + 3;
-  const packed = findAuthorityEnd(rawUrl, authorityStart);
-  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
-  const hostStart = at >= authorityStart ? at + 1 : authorityStart;
-
-  // Locate existing port boundaries.
-  let portColon = -1;
-  if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
-    const closeBracket = rawUrl.indexOf("]", hostStart + 1);
-    if (closeBracket !== -1 && closeBracket < authorityEnd) {
-      const afterBracket = closeBracket + 1;
-      if (
-        afterBracket < authorityEnd &&
-        rawUrl.charCodeAt(afterBracket) === CH_COLON
-      ) {
-        portColon = afterBracket;
-      }
-    }
-  } else {
-    const colonPos = rawUrl.indexOf(":", hostStart);
-    if (colonPos !== -1 && colonPos < authorityEnd) {
-      portColon = colonPos;
-    }
-  }
+  locateHostRange(rawUrl, schemePos);
+  const portColon = PORT_C;
+  const authorityEnd = AUTH_E;
 
   if (port === null) {
     if (portColon === -1) {
@@ -654,7 +585,6 @@ export function setPathname(rawUrl: string, newPathname: string): string {
   } else {
     pathStart = 0;
   }
-
   let pathEnd = rawUrl.length;
   const qPos = rawUrl.indexOf("?", pathStart);
   if (qPos !== -1 && qPos < pathEnd) {
@@ -664,7 +594,6 @@ export function setPathname(rawUrl: string, newPathname: string): string {
   if (hPos !== -1 && hPos < pathEnd) {
     pathEnd = hPos;
   }
-
   return (
     rawUrl.substring(0, pathStart) + normalized + rawUrl.substring(pathEnd)
   );

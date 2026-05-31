@@ -19,7 +19,7 @@ const CH_AT = 64;
 // "+" / "-" / ".". Indexed by char code; 1 = allowed, 0 = not. A single table
 // read per char beats a branch ladder of range/equality comparisons in the hot
 // scheme-detection path (see findSchemeEnd).
-export const SCHEME_CONT = new Uint8Array(128);
+const SCHEME_CONT = new Uint8Array(128);
 for (let c = 48 /* 0 */; c <= 57 /* 9 */; c++) {
   SCHEME_CONT[c] = 1;
 }
@@ -194,28 +194,22 @@ export function findAuthorityEnd(rawUrl: string, start: number): number {
 // ws=80, wss=443, ftp=21. Returns -1 for any other scheme. Case-insensitive
 // ASCII byte compare; no allocation. `schemeEnd` is the length of the scheme
 // (i.e. the index of the first ':' in "scheme://...").
-// fallow-ignore-next-line complexity
 export function defaultPortFor(rawUrl: string, schemeEnd: number): number {
-  if (schemeEnd === 5) {
-    if (
-      (rawUrl.charCodeAt(0) | 32) === 104 /* h */ &&
-      (rawUrl.charCodeAt(1) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(2) | 32) === 116 /* t */ &&
-      (rawUrl.charCodeAt(3) | 32) === 112 /* p */ &&
-      (rawUrl.charCodeAt(4) | 32) === 115 /* s */
-    ) {
-      return 443;
-    }
-    return -1;
-  }
-  if (schemeEnd === 4) {
+  // http (len 4) and https (len 5) share the leading "http" compare. One
+  // length dispatch, one byte-equality block, then branch on the optional 's'.
+  if (schemeEnd === 4 || schemeEnd === 5) {
     if (
       (rawUrl.charCodeAt(0) | 32) === 104 /* h */ &&
       (rawUrl.charCodeAt(1) | 32) === 116 /* t */ &&
       (rawUrl.charCodeAt(2) | 32) === 116 /* t */ &&
       (rawUrl.charCodeAt(3) | 32) === 112 /* p */
     ) {
-      return 80;
+      if (schemeEnd === 4) {
+        return 80;
+      }
+      if ((rawUrl.charCodeAt(4) | 32) === 115 /* s */) {
+        return 443;
+      }
     }
     return -1;
   }
@@ -245,6 +239,19 @@ export function defaultPortFor(rawUrl: string, schemeEnd: number): number {
       return 80; // ws
     }
     return -1;
+  }
+  return -1;
+}
+
+// Decodes a single ASCII hex digit to its value 0–15, or -1 if not a hex
+// digit. `| 32` lowercases A–F so one range check covers both cases.
+export function hexNibble(code: number): number {
+  if (code >= 48 && code <= 57) {
+    return code - 48;
+  }
+  const lc = code | 32;
+  if (lc >= 97 && lc <= 102) {
+    return lc - 87;
   }
   return -1;
 }

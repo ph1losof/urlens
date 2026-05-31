@@ -1,6 +1,14 @@
 import { decodeRange } from "./decode.js";
 import { encodeQueryComponent } from "./encode.js";
 import { CH_AMP, findKeyMatch } from "./internal.js";
+import {
+  compareDecodedValueRange,
+  hasQueryParamDecodedFallback,
+  keyIsAmbiguous,
+  queryHasEncoding,
+  queryParamDecodedFallback,
+  queryParamEqualsDecodedFallback,
+} from "./query-scan.js";
 
 const CH_PERCENT = 37;
 const CH_PLUS = 43;
@@ -49,52 +57,6 @@ function locate(rawUrl: string): void {
   LOC_F = hPos === -1 ? rawUrl.length : hPos;
 }
 
-// Returns true if `[start, end)` of `rawUrl` contains any character WHATWG
-// `application/x-www-form-urlencoded` decoding would interpret (`%` or `+`).
-// Gates the decoded-key fallback: when false, byte-strict was conclusive.
-// Two SIMD-accelerated indexOf calls; the early return after the first hit
-// makes the typical "encoded value, plain query" case ~5ns.
-//
-// A manual one-pass charCodeAt scan was benched and reverted: SIMD wins on
-// the query-range inputs here (10–80 chars), unlike the short-key case in
-// keyIsAmbiguous where SIMD setup cost dominated.
-//
-// Module-internal export: shared with UrlView via view.ts. Not in index.ts.
-export function queryHasEncoding(
-  rawUrl: string,
-  start: number,
-  end: number
-): boolean {
-  const pct = rawUrl.indexOf("%", start);
-  if (pct !== -1 && pct < end) {
-    return true;
-  }
-  const plus = rawUrl.indexOf("+", start);
-  return plus !== -1 && plus < end;
-}
-
-// Returns true if `key` contains any character that would make WHATWG
-// disagree with byte-equal matching on the URL side (i.e. `%` or `+`).
-// Used as the ambiguity gate at function entry: if false, byte-equal hits
-// are WHATWG-correct and can be returned immediately; if true, each
-// byte-equal hit is verified with compareDecodedValueRange.
-//
-// One charCodeAt loop instead of two SIMD indexOf calls. Keys are typically
-// short (1–15 chars); SIMD's setup cost dominates the per-call work at that
-// length, so a manual scan is measurably faster.
-//
-// Module-internal export: shared with UrlView via view.ts. Not in index.ts.
-export function keyIsAmbiguous(key: string): boolean {
-  const len = key.length;
-  for (let p = 0; p < len; p++) {
-    const c = key.charCodeAt(p);
-    if (c === CH_PERCENT || c === CH_PLUS) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Setter combined-scan helper.
 //
 // Setters need TWO things about the user key: its WHATWG-canonical encoded
@@ -123,6 +85,72 @@ SAFE_KEY[95] = 1; // _
 
 let KEY_ENCODED = "";
 let KEY_AMBIG = false;
+
+// Lazy gate for setQueryParams / removeQueryParams' decoded fallback:
+// queryHasEncoding is computed at most once per public call. -1 = not yet
+// computed; 0 = no '%'/'+' anywhere in the query (fallback can never fire);
+// 1 = at least one present. Reset to -1 at every public-call entry; consumed
+// inside matchFieldDecodedFallback. Same allocation-free pattern as locate().
+let Q_ENC_STATE = -1;
+
+// Cold-path WHATWG-decoded fallback shared by setQueryParams and
+// removeQueryParams. Only invoked after the byte-equal prefilter misses;
+// further short-circuited unless (a) at least one key has length ≤ fieldLen,
+// (b) the query contains '%'/'+', and (c) THIS field contains '%'/'+'.
+// Returns the matched key slot, or -1.
+//
+// Extracted because the hot byte-strict prefilter MUST stay inline at both
+// call sites — function-call overhead per field shows up as ~3% on rqp.removeN.
+// The fallback is cold (typically taken on < 1% of fields), so the call
+// boundary here is invisible.
+function matchFieldDecodedFallback(
+  raw: string,
+  fieldStart: number,
+  keyEnd: number,
+  fieldLen: number,
+  keys: readonly string[],
+  queryStart: number,
+  queryEnd: number
+): number {
+  // Decoded length ≤ encoded length: prune when no key could possibly fit.
+  let couldMatch = false;
+  const n = keys.length;
+  for (let k = 0; k < n; k++) {
+    if (fieldLen >= keys[k].length) {
+      couldMatch = true;
+      break;
+    }
+  }
+  if (!couldMatch) {
+    return -1;
+  }
+  if (Q_ENC_STATE === -1) {
+    Q_ENC_STATE = queryHasEncoding(raw, queryStart, queryEnd) ? 1 : 0;
+  }
+  if (Q_ENC_STATE === 0) {
+    return -1;
+  }
+  let fieldEnc = false;
+  for (let p = fieldStart; p < keyEnd; p++) {
+    const c = raw.charCodeAt(p);
+    if (c === CH_PERCENT || c === CH_PLUS) {
+      fieldEnc = true;
+      break;
+    }
+  }
+  if (!fieldEnc) {
+    return -1;
+  }
+  for (let k = 0; k < n; k++) {
+    if (
+      fieldLen >= keys[k].length &&
+      compareDecodedValueRange(raw, fieldStart, keyEnd, keys[k])
+    ) {
+      return k;
+    }
+  }
+  return -1;
+}
 
 // fallow-ignore-next-line complexity
 function analyzeSetterKey(key: string): void {
@@ -193,7 +221,7 @@ export function readQueryParam(rawUrl: string, key: string): string | null {
     if (!queryHasEncoding(rawUrl, queryStart, end)) {
       return null;
     }
-    return readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
+    return queryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
   }
 
   // Ambiguous user key: each byte-equal hit must be verified with the WHATWG
@@ -223,63 +251,7 @@ export function readQueryParam(rawUrl: string, key: string): string | null {
   if (!queryHasEncoding(rawUrl, queryStart, end)) {
     return null;
   }
-  return readQueryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
-}
-
-// Pass 2 helpers: WHATWG-decoded key match via the existing UTF-8 walker.
-// Decoded length is always ≤ encoded length, so `fieldLen < keyLen` prunes
-// candidates without paying for the walker. Only ever called when the URL's
-// query range is known to contain '%' or '+'. This is the slow path — a
-// non-inlined helper call here is invisible cost.
-//
-// scanDecodedQueryField writes the matching field's `=` position (or -1 if
-// the field has no '=') into FIELD_EQ and returns the matching `&` position
-// (or `end`). Returns -1 if no field matches.
-let FIELD_EQ = -1;
-
-// fallow-ignore-next-line complexity
-function scanDecodedQueryField(
-  rawUrl: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number
-): number {
-  let i = queryStart;
-  while (i < end) {
-    let amp = rawUrl.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = rawUrl.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (
-      keyEnd - i >= keyLen &&
-      compareDecodedValueRange(rawUrl, i, keyEnd, key)
-    ) {
-      FIELD_EQ = eq === -1 || eq > amp ? -1 : eq;
-      return amp;
-    }
-    i = amp + 1;
-  }
-  return -1;
-}
-
-function readQueryParamDecodedFallback(
-  rawUrl: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number
-): string | null {
-  const amp = scanDecodedQueryField(rawUrl, queryStart, end, key, keyLen);
-  if (amp === -1) {
-    return null;
-  }
-  if (FIELD_EQ === -1) {
-    return "";
-  }
-  return decodeRange(rawUrl, FIELD_EQ + 1, amp);
+  return queryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
 }
 
 /**
@@ -603,7 +575,7 @@ export function setQueryParams(
   const queryEnd = fragmentStart;
   let newQuery = "";
   let i = queryStart;
-  let queryEncodingState = -1;
+  Q_ENC_STATE = -1;
 
   while (i < queryEnd) {
     let amp = rawUrl.indexOf("&", i);
@@ -631,44 +603,16 @@ export function setQueryParams(
         break;
       }
     }
-
-    // WHATWG-decoded fallback when no byte-equal match.
     if (matchedSlot === -1) {
-      let couldMatch = false;
-      for (let k = 0; k < n; k++) {
-        if (fieldLen >= keys[k].length) {
-          couldMatch = true;
-          break;
-        }
-      }
-      if (couldMatch) {
-        if (queryEncodingState === -1) {
-          queryEncodingState = queryHasEncoding(rawUrl, queryStart, queryEnd)
-            ? 1
-            : 0;
-        }
-        if (queryEncodingState === 1) {
-          let fieldEnc = false;
-          for (let p = i; p < keyEnd; p++) {
-            const c = rawUrl.charCodeAt(p);
-            if (c === CH_PERCENT || c === CH_PLUS) {
-              fieldEnc = true;
-              break;
-            }
-          }
-          if (fieldEnc) {
-            for (let k = 0; k < n; k++) {
-              if (
-                fieldLen >= keys[k].length &&
-                compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
-              ) {
-                matchedSlot = k;
-                break;
-              }
-            }
-          }
-        }
-      }
+      matchedSlot = matchFieldDecodedFallback(
+        rawUrl,
+        i,
+        keyEnd,
+        fieldLen,
+        keys,
+        queryStart,
+        queryEnd
+      );
     }
 
     if (matchedSlot !== -1) {
@@ -767,7 +711,7 @@ export function removeQueryParams(
   const queryStart = qPos + 1;
   let newQuery = "";
   let i = queryStart;
-  let queryEncodingState = -1;
+  Q_ENC_STATE = -1;
 
   while (i < queryEnd) {
     let amp = rawUrl.indexOf("&", i);
@@ -795,44 +739,19 @@ export function removeQueryParams(
         break;
       }
     }
-
-    // WHATWG-decoded fallback when no byte-equal match.
-    if (!isMatch) {
-      let couldMatch = false;
-      for (let k = 0; k < n; k++) {
-        if (fieldLen >= keys[k].length) {
-          couldMatch = true;
-          break;
-        }
-      }
-      if (couldMatch) {
-        if (queryEncodingState === -1) {
-          queryEncodingState = queryHasEncoding(rawUrl, queryStart, queryEnd)
-            ? 1
-            : 0;
-        }
-        if (queryEncodingState === 1) {
-          let fieldEnc = false;
-          for (let p = i; p < keyEnd; p++) {
-            const c = rawUrl.charCodeAt(p);
-            if (c === CH_PERCENT || c === CH_PLUS) {
-              fieldEnc = true;
-              break;
-            }
-          }
-          if (fieldEnc) {
-            for (let k = 0; k < n; k++) {
-              if (
-                fieldLen >= keys[k].length &&
-                compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
-              ) {
-                isMatch = true;
-                break;
-              }
-            }
-          }
-        }
-      }
+    if (
+      !isMatch &&
+      matchFieldDecodedFallback(
+        rawUrl,
+        i,
+        keyEnd,
+        fieldLen,
+        keys,
+        queryStart,
+        queryEnd
+      ) !== -1
+    ) {
+      isMatch = true;
     }
 
     if (!isMatch) {
@@ -930,16 +849,6 @@ export function hasQueryParam(rawUrl: string, key: string): boolean {
   );
 }
 
-function hasQueryParamDecodedFallback(
-  rawUrl: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number
-): boolean {
-  return scanDecodedQueryField(rawUrl, queryStart, end, key, keyLen) !== -1;
-}
-
 /**
  * Zero-allocation predicate: returns `true` if the decoded value of `key`
  * equals `expected`. Key matching is WHATWG-decoded.
@@ -1034,227 +943,6 @@ export function queryParamEquals(
     keyLen,
     expected
   );
-}
-
-// fallow-ignore-next-line complexity
-function queryParamEqualsDecodedFallback(
-  rawUrl: string,
-  queryStart: number,
-  end: number,
-  key: string,
-  keyLen: number,
-  expected: string
-): boolean {
-  let i = queryStart;
-  while (i < end) {
-    let amp = rawUrl.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const eq = rawUrl.indexOf("=", i);
-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
-    if (
-      keyEnd - i >= keyLen &&
-      compareDecodedValueRange(rawUrl, i, keyEnd, key)
-    ) {
-      const valStart = eq === -1 || eq > amp ? amp : eq + 1;
-      return compareDecodedValueRange(rawUrl, valStart, amp, expected);
-    }
-    i = amp + 1;
-  }
-  return false;
-}
-
-// fallow-ignore-next-line complexity
-function hexNibble(code: number): number {
-  if (code >= 48 && code <= 57) {
-    return code - 48;
-  }
-  const lc = code | 32;
-  if (lc >= 97 && lc <= 102) {
-    return lc - 87;
-  }
-  return -1;
-}
-
-// Reads a `%XY` continuation byte at position `pos`. Returns the byte value
-// if it parses to a valid UTF-8 continuation byte (top two bits 10), or -1
-// otherwise (out of range, not a percent-escape, or doesn't satisfy 10xxxxxx).
-// fallow-ignore-next-line complexity
-function readContByte(s: string, pos: number, end: number): number {
-  if (pos + 2 >= end || s.charCodeAt(pos) !== CH_PERCENT) {
-    return -1;
-  }
-  const hi = hexNibble(s.charCodeAt(pos + 1));
-  const lo = hexNibble(s.charCodeAt(pos + 2));
-  if (hi === -1 || lo === -1) {
-    return -1;
-  }
-  const b = (hi << 4) | lo;
-  if ((b & 0xc0) !== 0x80) {
-    return -1;
-  }
-  return b;
-}
-
-// Compares the URL value bytes against `expected`, decoding the URL value one
-// Unicode codepoint at a time and matching codepoints to chars (or surrogate
-// pairs) in `expected`. Implements the WHATWG UTF-8 decoder error model: an
-// invalid byte emits U+FFFD and any non-continuation byte "stolen" by a bad
-// lead is re-processed at the next iteration. Zero allocation — no
-// substring, no temporary decoded string, no TextDecoder.
-//
-// Module-internal export: shared with UrlView.queryParamEquals via view.ts.
-// Not re-exported from index.ts.
-// fallow-ignore-next-line complexity
-export function compareDecodedValueRange(
-  s: string,
-  start: number,
-  end: number,
-  expected: string
-): boolean {
-  const expectedLen = expected.length;
-  let i = start;
-  let j = 0;
-
-  while (i < end && j < expectedLen) {
-    // Decode the next codepoint, producing `codepoint` and `advance` (chars
-    // to consume). On WHATWG-invalid sequences, codepoint = 0xFFFD and we
-    // advance past only what was validly read.
-    let codepoint: number;
-    let advance: number;
-
-    const c = s.charCodeAt(i);
-
-    if (c === CH_PLUS) {
-      codepoint = 32; // space
-      advance = 1;
-    } else if (c === CH_PERCENT && i + 2 < end) {
-      const hi = hexNibble(s.charCodeAt(i + 1));
-      const lo = hexNibble(s.charCodeAt(i + 2));
-      if (hi === -1 || lo === -1) {
-        // Malformed %XY (e.g. %ZZ): treat '%' as a literal character. The
-        // following two chars are matched as plain bytes on next iterations.
-        codepoint = 37;
-        advance = 1;
-      } else {
-        const byte = (hi << 4) | lo;
-        if (byte < 0x80) {
-          codepoint = byte;
-          advance = 3;
-        } else if (byte < 0xc2) {
-          // 0x80–0xBF: lone continuation byte. 0xC0, 0xC1: overlong 2-byte
-          // sequence start. All invalid under WHATWG.
-          codepoint = 0xfffd;
-          advance = 3;
-        } else if (byte < 0xe0) {
-          // 2-byte sequence.
-          const c1 = readContByte(s, i + 3, end);
-          if (c1 === -1) {
-            codepoint = 0xfffd;
-            advance = 3;
-          } else {
-            codepoint = ((byte & 0x1f) << 6) | (c1 & 0x3f);
-            advance = 6;
-          }
-        } else if (byte < 0xf0) {
-          // 3-byte sequence. Apply WHATWG range constraints on the first
-          // continuation: 0xE0 forbids overlong (cont must be 0xA0..0xBF);
-          // 0xED forbids surrogates (cont must be 0x80..0x9F).
-          const c1 = readContByte(s, i + 3, end);
-          if (c1 === -1) {
-            codepoint = 0xfffd;
-            advance = 3;
-          } else {
-            const lower = byte === 0xe0 ? 0xa0 : 0x80;
-            const upper = byte === 0xed ? 0x9f : 0xbf;
-            if (c1 < lower || c1 > upper) {
-              // First cont byte out of range: emit U+FFFD; re-process c1.
-              codepoint = 0xfffd;
-              advance = 3;
-            } else {
-              const c2 = readContByte(s, i + 6, end);
-              if (c2 === -1) {
-                codepoint = 0xfffd;
-                advance = 6;
-              } else {
-                codepoint =
-                  ((byte & 0x0f) << 12) | ((c1 & 0x3f) << 6) | (c2 & 0x3f);
-                advance = 9;
-              }
-            }
-          }
-        } else if (byte < 0xf5) {
-          // 4-byte sequence. 0xF0 forbids overlong (cont >= 0x90); 0xF4 caps
-          // at U+10FFFF (cont <= 0x8F).
-          const c1 = readContByte(s, i + 3, end);
-          if (c1 === -1) {
-            codepoint = 0xfffd;
-            advance = 3;
-          } else {
-            const lower = byte === 0xf0 ? 0x90 : 0x80;
-            const upper = byte === 0xf4 ? 0x8f : 0xbf;
-            if (c1 < lower || c1 > upper) {
-              codepoint = 0xfffd;
-              advance = 3;
-            } else {
-              const c2 = readContByte(s, i + 6, end);
-              if (c2 === -1) {
-                codepoint = 0xfffd;
-                advance = 6;
-              } else {
-                const c3 = readContByte(s, i + 9, end);
-                if (c3 === -1) {
-                  codepoint = 0xfffd;
-                  advance = 9;
-                } else {
-                  codepoint =
-                    ((byte & 0x07) << 18) |
-                    ((c1 & 0x3f) << 12) |
-                    ((c2 & 0x3f) << 6) |
-                    (c3 & 0x3f);
-                  advance = 12;
-                }
-              }
-            }
-          }
-        } else {
-          // byte >= 0xF5: invalid (would produce > U+10FFFF).
-          codepoint = 0xfffd;
-          advance = 3;
-        }
-      }
-    } else {
-      // Plain ASCII (or non-percent literal): one char.
-      codepoint = c;
-      advance = 1;
-    }
-
-    // Compare codepoint to expected at position j.
-    if (codepoint <= 0xffff) {
-      if (expected.charCodeAt(j) !== codepoint) {
-        return false;
-      }
-      j++;
-    } else {
-      // Astral: compare against a UTF-16 surrogate pair in `expected`.
-      if (j + 1 >= expectedLen) {
-        return false;
-      }
-      const offset = codepoint - 0x10000;
-      if (expected.charCodeAt(j) !== 0xd800 + (offset >> 10)) {
-        return false;
-      }
-      if (expected.charCodeAt(j + 1) !== 0xdc00 + (offset & 0x3ff)) {
-        return false;
-      }
-      j += 2;
-    }
-
-    i += advance;
-  }
-
-  return i === end && j === expectedLen;
 }
 
 /**

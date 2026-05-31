@@ -2,6 +2,6 @@
   "$schema": "https://docs.fallow.tools/schema/config.json",
   "entry": ["test/**/*.test.ts"],
   "duplicates": {
-    "ignore": ["src/query.ts", "src/view.ts", "src/url.ts"]
+    "ignore": ["src/query.ts", "src/view.ts", "src/url.ts", "src/query-scan.ts"]
   }
 }

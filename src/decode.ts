@@ -1,19 +1,9 @@
+import { hexNibble } from "./internal.js";
+
 const CH_PERCENT = 37;
 const CH_PLUS = 43;
 
 const UTF8_DECODER = new TextDecoder();
-
-// fallow-ignore-next-line complexity
-function hexNibble(code: number): number {
-  if (code >= 48 && code <= 57) {
-    return code - 48;
-  }
-  const lc = code | 32;
-  if (lc >= 97 && lc <= 102) {
-    return lc - 87;
-  }
-  return -1;
-}
 
 // Decodes the URL component within `[start, end)` of `s`. A single charCodeAt
 // pass simultaneously detects `%` and `+`. When neither appears, returns a

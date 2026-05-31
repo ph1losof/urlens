@@ -42,18 +42,29 @@ const engines: EngineLabel[] = [
   { name: "WebKit (JavaScriptCore)", launcher: webkit },
 ];
 
-for (const { name, launcher } of engines) {
-  console.log(`\n======== ${name} ========`);
+// Run all three engines concurrently — they're fully independent and the
+// inner page.evaluate is the dominant cost. Collect each engine's output
+// into a buffer so the printed blocks stay grouped instead of interleaving.
+async function runEngine({ name, launcher }: EngineLabel): Promise<string> {
   const browser = await launcher.launch();
   try {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     await page.goto("about:blank");
-    const output = await page.evaluate(wrapper);
-    console.log(output);
-  } catch (e) {
-    console.error(`[${name}] error:`, e);
+    return await page.evaluate(wrapper);
   } finally {
     await browser.close();
+  }
+}
+
+const settled = await Promise.allSettled(engines.map(runEngine));
+for (let i = 0; i < engines.length; i++) {
+  const { name } = engines[i];
+  console.log(`\n======== ${name} ========`);
+  const r = settled[i];
+  if (r.status === "fulfilled") {
+    console.log(r.value);
+  } else {
+    console.error(`[${name}] error:`, r.reason);
   }
 }
