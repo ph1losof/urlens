@@ -11,6 +11,8 @@
 
 import {
   hasScheme as _hasScheme,
+  decodeQueryComponent,
+  encodeQueryComponent,
   hasQueryParam,
   originMatches,
   pathnameStartsWith,
@@ -30,6 +32,7 @@ import {
   setPathname,
   setPort,
   setQueryParam,
+  setQueryParams,
   view,
 } from "../src/index.js";
 
@@ -73,6 +76,10 @@ const out =
 
 const hasURL = typeof URL !== "undefined";
 const hasURLSearchParams = typeof URLSearchParams !== "undefined";
+const benchGlobals = globalThis as typeof globalThis & {
+  URLENS_BENCH_FILTER?: string;
+  URLENS_BENCH_BUDGET?: number;
+};
 
 // Reference once so biome doesn't flag the import as unused — keeps `hasScheme`
 // in the bundle for future cases without re-editing the import list.
@@ -716,9 +723,82 @@ add("rqp.removeN.seq", () => {
   SINK = (SINK + s.length) | 0;
 });
 
+// Focused cases for allocation-heavy and otherwise under-measured paths. Run
+// only these with `bun run bench:micro` while iterating on internals.
+const MICRO_SAFE = ring(["alpha123", "bravo_2", "charlie-3", "delta.4"]);
+const MICRO_PLUS = ring([
+  "hello+world+again",
+  "red+fox+running",
+  "small+query+value",
+  "three+word+phrase",
+]);
+const MICRO_ENCODED = ring([
+  "caf%C3%A9+%E2%98%95",
+  "na%C3%AFve+resum%C3%A9",
+  "%E4%B8%AD%E6%96%87+text",
+  "%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82",
+]);
+const MICRO_MALFORMED = ring([
+  "%ZZ+raw+%E2%98%95",
+  "%QQ+bad+%C3%A9",
+  "%G1+mixed+%41",
+  "%--+broken+%F0%9F%98%80",
+]);
+const MICRO_HOST = ring([
+  "https://example.com/a/long/path/with:colon?q=1#frag",
+  "https://api.example.org/a/long/path/without/port?q=2",
+  "https://cdn.example.net/assets/file:name.js?q=3",
+  "https://user@example.test/deep/path/value?q=4",
+]);
+const ONE_KEY = ["q"] as const;
+const MISS_KEYS = ["missing", "absent"];
+const ONE_PARAM = { q: "updated" };
+
+add("micro.decode.safe", () => {
+  SINK = (SINK + decodeQueryComponent(MICRO_SAFE[nextIdx()]).length) | 0;
+});
+add("micro.decode.plus", () => {
+  SINK = (SINK + decodeQueryComponent(MICRO_PLUS[nextIdx()]).length) | 0;
+});
+add("micro.decode.encoded", () => {
+  SINK = (SINK + decodeQueryComponent(MICRO_ENCODED[nextIdx()]).length) | 0;
+});
+add("micro.decode.malformed", () => {
+  SINK = (SINK + decodeQueryComponent(MICRO_MALFORMED[nextIdx()]).length) | 0;
+});
+add("micro.encode.safe", () => {
+  SINK = (SINK + encodeQueryComponent(MICRO_SAFE[nextIdx()]).length) | 0;
+});
+add("micro.encode.mixed", () => {
+  SINK = (SINK + encodeQueryComponent(MICRO_PLUS[nextIdx()]).length) | 0;
+});
+add("micro.rqs.one", () => {
+  const r = readQueryParams(FIX.plainQuery[nextIdx()], ONE_KEY);
+  SINK = (SINK + (r[0] || "").length) | 0;
+});
+add("micro.setN.one", () => {
+  SINK =
+    (SINK + setQueryParams(FIX.plainQuery[nextIdx()], ONE_PARAM).length) | 0;
+});
+add("micro.remove.miss", () => {
+  SINK =
+    (SINK + removeQueryParam(FIX.plainQuery[nextIdx()], "missing").length) | 0;
+});
+add("micro.removeN.miss", () => {
+  SINK =
+    (SINK + removeQueryParams(FIX.plainQuery[nextIdx()], MISS_KEYS).length) | 0;
+});
+add("micro.hostname.noport", () => {
+  SINK = (SINK + readHostname(MICRO_HOST[nextIdx()]).length) | 0;
+});
+add("micro.port.noport", () => {
+  SINK = (SINK + (readPort(MICRO_HOST[nextIdx()]) || 0)) | 0;
+});
+
 // --- run ---------------------------------------------------------------------
 
-const BUDGET = 600;
+const BUDGET = benchGlobals.URLENS_BENCH_BUDGET ?? 600;
+const FILTER = benchGlobals.URLENS_BENCH_FILTER ?? "";
 const engineLabel = navigator?.userAgent ?? "unknown";
 out(`engine=${engineLabel}`);
 out(`budget=${BUDGET}ms per case`);
@@ -727,6 +807,12 @@ out(`${pad("case", 18)}${pad("ops/sec", 14)}ops`);
 
 const results: BenchResult[] = [];
 for (const c of cases) {
+  if (
+    (FILTER && !c.name.startsWith(FILTER)) ||
+    (!FILTER && c.name.startsWith("micro."))
+  ) {
+    continue;
+  }
   const r = bench(c.name, c.fn, BUDGET);
   results.push(r);
   out(`${pad(r.name, 18)}${pad(`${fmt(r.perSec)}/s`, 14)}${String(r.ops)}`);

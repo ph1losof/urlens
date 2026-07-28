@@ -18,6 +18,8 @@ if (!build.success) {
   throw new Error("bench harness bundle failed");
 }
 const benchSrc = await build.outputs[0].text();
+const benchFilter = process.env.URLENS_BENCH_FILTER ?? "";
+const benchBudget = Number(process.env.URLENS_BENCH_BUDGET ?? 600);
 
 // The harness calls `print(...)` to emit lines. We override `globalThis.print`
 // before eval so each line lands in `__lines`, then return the joined text to
@@ -26,6 +28,8 @@ const wrapper = `
 (async () => {
   const __lines = [];
   globalThis.print = (s) => __lines.push(String(s));
+  globalThis.URLENS_BENCH_FILTER = ${JSON.stringify(benchFilter)};
+  globalThis.URLENS_BENCH_BUDGET = ${JSON.stringify(benchBudget)};
   ${benchSrc}
   return __lines.join("\\n");
 })()

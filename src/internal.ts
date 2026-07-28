@@ -4,8 +4,8 @@
 // does not regress the hot path.
 
 export const CH_SLASH = 47;
-const CH_QUESTION = 63;
-const CH_HASH = 35;
+export const CH_QUESTION = 63;
+export const CH_HASH = 35;
 export const CH_COLON = 58;
 export const CH_OPEN_BRACKET = 91;
 export const CH_0 = 48;

@@ -318,6 +318,12 @@ export class UrlView {
     if (n === 0 || this._queryStart === -1) {
       return out;
     }
+    if (n === 1) {
+      (out as Record<string, string | null>)[keys[0]] = this.queryParam(
+        keys[0]
+      );
+      return out;
+    }
 
     const raw = this._raw;
     const end = this._fragStart !== -1 ? this._fragStart : this._len;
@@ -326,12 +332,16 @@ export class UrlView {
     // int compare instead of two array reads + two compares. The `-1`
     // sentinel marks a slot as resolved: it can't equal a non-negative
     // fieldPacked, so the same prefilter check skips found keys without a
-    // separate `found[]` allocation.
+    // separate `found[]` allocation. Ambiguity flags use one scalar bit mask
+    // for normal batch sizes instead of another array.
     const keyPacked: number[] = new Array(n);
-    const keyAmbig: boolean[] = new Array(n);
+    const useAmbigMask = n <= 32;
+    let keyAmbigMask = 0;
     for (let k = 0; k < n; k++) {
       keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
-      keyAmbig[k] = keyIsAmbiguous(keys[k]);
+      if (useAmbigMask && keyIsAmbiguous(keys[k])) {
+        keyAmbigMask |= 1 << k;
+      }
     }
 
     // Pass 1: byte-strict, with verification for ambiguous keys.
@@ -352,7 +362,9 @@ export class UrlView {
         }
         if (raw.startsWith(keys[k], i)) {
           if (
-            !keyAmbig[k] ||
+            (useAmbigMask
+              ? (keyAmbigMask & (1 << k)) === 0
+              : !keyIsAmbiguous(keys[k])) ||
             compareDecodedValueRange(raw, i, keyEnd, keys[k])
           ) {
             (out as Record<string, string | null>)[keys[k]] =

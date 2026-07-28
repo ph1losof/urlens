@@ -288,18 +288,24 @@ export function readQueryParams<const K extends readonly string[]>(
   if (n === 0) {
     return out as { -readonly [I in keyof K]: string | null };
   }
+  if (n === 1) {
+    out[0] = readQueryParam(rawUrl, keys[0]);
+    return out as { -readonly [I in keyof K]: string | null };
+  }
 
-  // Precompute (firstChar << 16 | length) packed prefilter + ambig flag for
-  // each key. The inner loop's hot reject is a single int compare against the
-  // field's matching pack — half the array reads and compares vs. holding
-  // firstChar and length as separate arrays.
+  // Precompute (firstChar << 16 | length) packed prefilter per key. Ambiguity
+  // flags fit in one scalar bit mask for normal batch sizes, avoiding a second
+  // per-call metadata array.
   const keyPacked: number[] = new Array(n);
-  const keyAmbig: boolean[] = new Array(n);
+  const useAmbigMask = n <= 32;
+  let keyAmbigMask = 0;
   for (let k = 0; k < n; k++) {
     out[k] = null;
     const kk = keys[k];
     keyPacked[k] = kk.charCodeAt(0) * 65536 + kk.length;
-    keyAmbig[k] = keyIsAmbiguous(kk);
+    if (useAmbigMask && keyIsAmbiguous(kk)) {
+      keyAmbigMask |= 1 << k;
+    }
   }
 
   locate(rawUrl);
@@ -329,7 +335,9 @@ export function readQueryParams<const K extends readonly string[]>(
       }
       if (rawUrl.startsWith(keys[k], i)) {
         if (
-          !keyAmbig[k] ||
+          (useAmbigMask
+            ? (keyAmbigMask & (1 << k)) === 0
+            : !keyIsAmbiguous(keys[k])) ||
           compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
         ) {
           out[k] =
@@ -430,6 +438,7 @@ export function setQueryParam(
 
   let newQuery = "";
   let replaced = false;
+  let matched = false;
   let i = queryStart;
 
   while (i < queryEnd) {
@@ -475,6 +484,7 @@ export function setQueryParam(
     }
 
     if (isMatch) {
+      matched = true;
       // First match: emit replacement (if value is non-null); drop dupes.
       if (!replaced && encoded !== null) {
         if (newQuery.length > 0) {
@@ -498,6 +508,10 @@ export function setQueryParam(
       newQuery += "&";
     }
     newQuery += `${encodedKey}=${encoded}`;
+  }
+
+  if (!matched && encoded === null) {
+    return rawUrl;
   }
 
   const prefix = rawUrl.substring(0, qPos);
@@ -529,6 +543,10 @@ export function setQueryParams(
   const n = keys.length;
   if (n === 0) {
     return rawUrl;
+  }
+  if (n === 1) {
+    const key = keys[0];
+    return setQueryParam(rawUrl, key, params[key]);
   }
 
   // Pre-encode keys + non-null values + precompute packed (firstChar<<16|len)
@@ -692,6 +710,9 @@ export function removeQueryParams(
   if (n === 0) {
     return rawUrl;
   }
+  if (n === 1) {
+    return removeQueryParam(rawUrl, keys[0]);
+  }
 
   locate(rawUrl);
   const qPos = LOC_Q;
@@ -710,6 +731,7 @@ export function removeQueryParams(
 
   const queryStart = qPos + 1;
   let newQuery = "";
+  let removed = false;
   let i = queryStart;
   Q_ENC_STATE = -1;
 
@@ -759,10 +781,16 @@ export function removeQueryParams(
         newQuery += "&";
       }
       newQuery += rawUrl.substring(i, amp);
+    } else {
+      removed = true;
     }
     // Else: skip this param entirely.
 
     i = amp + 1;
+  }
+
+  if (!removed) {
+    return rawUrl;
   }
 
   const prefix = rawUrl.substring(0, qPos);

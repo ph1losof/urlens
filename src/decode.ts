@@ -4,6 +4,7 @@ const CH_PERCENT = 37;
 const CH_PLUS = 43;
 
 const UTF8_DECODER = new TextDecoder();
+let DECODE_BYTES = new Uint8Array(64);
 
 // Decodes the URL component within `[start, end)` of `s`. A single charCodeAt
 // pass simultaneously detects `%` and `+`. When neither appears, returns a
@@ -16,20 +17,28 @@ const UTF8_DECODER = new TextDecoder();
 export function decodeRange(s: string, start: number, end: number): string {
   let pct = false;
   let plus = false;
+  let malformedEscape = false;
   for (let p = start; p < end; p++) {
     const c = s.charCodeAt(p);
     if (c === CH_PERCENT) {
-      if (plus) {
+      if (!pct) {
         pct = true;
+        if (
+          p + 2 >= end ||
+          hexNibble(s.charCodeAt(p + 1)) === -1 ||
+          hexNibble(s.charCodeAt(p + 2)) === -1
+        ) {
+          malformedEscape = true;
+        }
+      }
+      if (plus) {
         break;
       }
-      pct = true;
     } else if (c === CH_PLUS) {
+      plus = true;
       if (pct) {
-        plus = true;
         break;
       }
-      plus = true;
     }
   }
   if (!pct && !plus) {
@@ -39,6 +48,12 @@ export function decodeRange(s: string, start: number, end: number): string {
     // '+' only — substitute via a single-pass char walker (no regex).
     return plusToSpace(s, start, end);
   }
+  // Invalid % syntax would make decodeURIComponent throw. Detecting it in the
+  // scan we already perform avoids constructing an intermediate string and an
+  // exception on this otherwise disproportionately expensive path.
+  if (malformedEscape) {
+    return tolerantDecode(s, start, end);
+  }
   // Has '%'. Substitute any '+' first (form-urlencoded semantics), then try
   // the native decoder. On malformed escapes, fall through to tolerant decode.
   const prepared = plus ? plusToSpace(s, start, end) : s.substring(start, end);
@@ -47,7 +62,7 @@ export function decodeRange(s: string, start: number, end: number): string {
   } catch {
     // Fall through.
   }
-  return tolerantDecode(prepared);
+  return tolerantDecode(prepared, 0, prepared.length);
 }
 
 // Replaces every '+' in `s[start..end)` with a space. Caller has already
@@ -73,41 +88,47 @@ function plusToSpace(s: string, start: number, end: number): string {
 // TextDecoder, and treats '+' as space — matching the spec for query
 // components while not throwing.
 // fallow-ignore-next-line complexity
-function tolerantDecode(raw: string): string {
+function tolerantDecode(raw: string, start: number, end: number): string {
   let out = "";
-  const bytes: number[] = [];
+  let byteCount = 0;
 
-  const flush = (): void => {
-    if (bytes.length) {
-      out += UTF8_DECODER.decode(new Uint8Array(bytes));
-      bytes.length = 0;
-    }
-  };
-
-  for (let i = 0; i < raw.length; i++) {
+  for (let i = start; i < end; i++) {
     const c = raw.charCodeAt(i);
 
     if (c === CH_PLUS) {
-      flush();
+      if (byteCount !== 0) {
+        out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+        byteCount = 0;
+      }
       out += " ";
       continue;
     }
 
-    if (c === CH_PERCENT && i + 2 < raw.length) {
+    if (c === CH_PERCENT && i + 2 < end) {
       const hi = hexNibble(raw.charCodeAt(i + 1));
       const lo = hexNibble(raw.charCodeAt(i + 2));
       if (hi !== -1 && lo !== -1) {
-        bytes.push((hi << 4) | lo);
+        if (byteCount === DECODE_BYTES.length) {
+          const grown = new Uint8Array(byteCount * 2);
+          grown.set(DECODE_BYTES);
+          DECODE_BYTES = grown;
+        }
+        DECODE_BYTES[byteCount++] = (hi << 4) | lo;
         i += 2;
         continue;
       }
     }
 
-    flush();
+    if (byteCount !== 0) {
+      out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+      byteCount = 0;
+    }
     out += raw[i];
   }
 
-  flush();
+  if (byteCount !== 0) {
+    out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+  }
   return out;
 }
 

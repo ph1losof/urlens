@@ -44,6 +44,12 @@ describe("decodeQueryComponent", () => {
     expect(decodeQueryComponent("%E2%98%95%ZZ")).toBe("☕%ZZ");
   });
 
+  test("grows the tolerant byte buffer for long encoded runs", () => {
+    expect(decodeQueryComponent(`${"%41".repeat(100)}%ZZ`)).toBe(
+      `${"A".repeat(100)}%ZZ`
+    );
+  });
+
   test("handles + adjacent to valid UTF-8 escapes", () => {
     expect(decodeQueryComponent("+%C3%A9+")).toBe(" é ");
   });

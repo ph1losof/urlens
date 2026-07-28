@@ -3,7 +3,9 @@ import {
   CH_0,
   CH_9,
   CH_COLON,
+  CH_HASH,
   CH_OPEN_BRACKET,
+  CH_QUESTION,
   CH_SLASH,
   defaultPortFor,
   findAuthorityEnd,
@@ -30,10 +32,24 @@ let AUTH_E = 0;
 // fallow-ignore-next-line complexity
 function locateHostRange(s: string, schemeEnd: number): void {
   const authStart = schemeEnd + 3;
-  const packed = findAuthorityEnd(s, authStart);
-  const authEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
-  const hostStart = at >= authStart ? at + 1 : authStart;
+  const len = s.length;
+  let authEnd = len;
+  let hostStart = authStart;
+  let firstColon = -1;
+  for (let i = authStart; i < len; i++) {
+    const c = s.charCodeAt(i);
+    if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
+      authEnd = i;
+      break;
+    }
+    if (c === 64 /* @ */) {
+      // A later '@' moves the host start, so any prior userinfo colon is moot.
+      hostStart = i + 1;
+      firstColon = -1;
+    } else if (c === CH_COLON && firstColon === -1) {
+      firstColon = i;
+    }
+  }
   let hostEnd: number;
   let portColon: number;
   if (s.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
@@ -47,10 +63,9 @@ function locateHostRange(s: string, schemeEnd: number): void {
         hostEnd < authEnd && s.charCodeAt(hostEnd) === CH_COLON ? hostEnd : -1;
     }
   } else {
-    const colon = s.indexOf(":", hostStart);
-    if (colon !== -1 && colon < authEnd) {
-      hostEnd = colon;
-      portColon = colon;
+    if (firstColon !== -1) {
+      hostEnd = firstColon;
+      portColon = firstColon;
     } else {
       hostEnd = authEnd;
       portColon = -1;
