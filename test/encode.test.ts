@@ -39,6 +39,13 @@ describe("encodeQueryComponent", () => {
     expect(encodeQueryComponent("café")).toBe("caf%C3%A9");
     expect(encodeQueryComponent("☕")).toBe("%E2%98%95");
     expect(encodeQueryComponent("中文")).toBe("%E4%B8%AD%E6%96%87");
+    expect(encodeQueryComponent("🌟")).toBe("%F0%9F%8C%9F");
+  });
+
+  test("replaces lone UTF-16 surrogates with U+FFFD", () => {
+    expect(encodeQueryComponent("\uD800x")).toBe("%EF%BF%BDx");
+    expect(encodeQueryComponent("\uD800")).toBe("%EF%BF%BD");
+    expect(encodeQueryComponent("\uDC00")).toBe("%EF%BF%BD");
   });
 
   test("roundtrips with decodeQueryComponent", () => {

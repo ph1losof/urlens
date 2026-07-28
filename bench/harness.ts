@@ -33,6 +33,7 @@ import {
   setPort,
   setQueryParam,
   setQueryParams,
+  setScheme,
   view,
 } from "../src/index.js";
 
@@ -744,6 +745,12 @@ const MICRO_MALFORMED = ring([
   "%G1+mixed+%41",
   "%--+broken+%F0%9F%98%80",
 ]);
+const MICRO_MALFORMED_LATE = ring([
+  "%41+raw+%ZZ",
+  "ok%20value%QQ",
+  "%C3%A9+text+%G1",
+  "%F0%9F%98%80+done+%--",
+]);
 const MICRO_HOST = ring([
   "https://example.com/a/long/path/with:colon?q=1#frag",
   "https://api.example.org/a/long/path/without/port?q=2",
@@ -753,6 +760,31 @@ const MICRO_HOST = ring([
 const ONE_KEY = ["q"] as const;
 const MISS_KEYS = ["missing", "absent"];
 const ONE_PARAM = { q: "updated" };
+const TWO_PARAMS = { added: "hello world", page: "2" };
+const MICRO_NO_QUERY = ring([
+  "https://example.com/a/long/path#frag",
+  "https://example.org/deep/nested/path#section",
+  "https://a.test/assets/file.js#hash",
+  "https://b.test/api/v2/items#result",
+]);
+const MICRO_UNSAFE_KEY = ring([
+  "https://x.test/?weird%20key=1&a=2",
+  "https://x.test/?weird+key=2&a=3",
+  "https://x.test/?a=4&weird%20key=3",
+  "https://x.test/?a=5&weird+key=4",
+]);
+const MICRO_NOOP_PATH = ring([
+  "https://example.com/same/path?q=1#frag",
+  "https://example.org/same/path?q=2#a",
+  "https://a.test/same/path?q=3#b",
+  "https://b.test/same/path?q=4#c",
+]);
+const MICRO_NOOP_PORT = ring([
+  "https://example.com:8080/a?q=1",
+  "https://example.org:8080/b?q=2",
+  "https://a.test:8080/c?q=3",
+  "https://b.test:8080/d?q=4",
+]);
 
 add("micro.decode.safe", () => {
   SINK = (SINK + decodeQueryComponent(MICRO_SAFE[nextIdx()]).length) | 0;
@@ -765,6 +797,10 @@ add("micro.decode.encoded", () => {
 });
 add("micro.decode.malformed", () => {
   SINK = (SINK + decodeQueryComponent(MICRO_MALFORMED[nextIdx()]).length) | 0;
+});
+add("micro.decode.malformed.late", () => {
+  const r = decodeQueryComponent(MICRO_MALFORMED_LATE[nextIdx()]);
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
 });
 add("micro.encode.safe", () => {
   SINK = (SINK + encodeQueryComponent(MICRO_SAFE[nextIdx()]).length) | 0;
@@ -780,6 +816,14 @@ add("micro.setN.one", () => {
   SINK =
     (SINK + setQueryParams(FIX.plainQuery[nextIdx()], ONE_PARAM).length) | 0;
 });
+add("micro.setN.noquery", () => {
+  const r = setQueryParams(MICRO_NO_QUERY[nextIdx()], TWO_PARAMS);
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
+});
+add("micro.remove.unsafe", () => {
+  const r = removeQueryParam(MICRO_UNSAFE_KEY[nextIdx()], "weird key");
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
+});
 add("micro.remove.miss", () => {
   SINK =
     (SINK + removeQueryParam(FIX.plainQuery[nextIdx()], "missing").length) | 0;
@@ -793,6 +837,26 @@ add("micro.hostname.noport", () => {
 });
 add("micro.port.noport", () => {
   SINK = (SINK + (readPort(MICRO_HOST[nextIdx()]) || 0)) | 0;
+});
+add("micro.view.construct", () => {
+  const v = view(MICRO_HOST[nextIdx()]);
+  SINK = (SINK + v.hostname().length + (v.port() || 0)) | 0;
+});
+add("micro.pathname.boundary", () => {
+  SINK =
+    (SINK + readPathname("https://example.com?next=/deep/path").length) | 0;
+});
+add("micro.setPath.noop", () => {
+  const r = setPathname(MICRO_NOOP_PATH[nextIdx()], "/same/path");
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
+});
+add("micro.setPort.noop", () => {
+  const r = setPort(MICRO_NOOP_PORT[nextIdx()], 8080);
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
+});
+add("micro.setScheme.noop", () => {
+  const r = setScheme(FIX.fullUrl[nextIdx()], "https");
+  SINK = (SINK + r.length + r.charCodeAt(r.length - 1)) | 0;
 });
 
 // --- run ---------------------------------------------------------------------

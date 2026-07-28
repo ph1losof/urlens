@@ -322,14 +322,20 @@ Assume the input is already well-formed. URLs from `fetch`, `URL.toString()`, or
 ## Development
 
 ```sh
-bun install
-bun test                   # unit tests
-bun run typecheck          # tsc --noEmit
-bun run build              # tsc → dist/
-bun run bench              # cross-engine benchmarks (Playwright)
+bun install --frozen-lockfile
+bun test                     # unit tests
+bun run test:coverage        # tests + enforced coverage floor
+bun run typecheck            # strict TypeScript checks
+bun run build                # clean + declarations + ESM build
+bun run check                # Biome format/lint/assists + TypeScript
+bun run fix                  # apply Biome fixes and import organization
+bun run ci                   # complete local CI suite, including npm pack
+bun run bench                # cross-engine benchmarks (Playwright)
 bun run bench:update-readme  # bench + regenerate the table above
-bun run check              # biome lint + format
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the release process and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## License
 

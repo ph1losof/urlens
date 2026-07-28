@@ -3,3 +3,8 @@ peer = false
 
 [install.lockfile]
 save = true
+
+[test]
+coverage = true
+coverageReporter = ["text", "lcov"]
+coverageThreshold = { lines = 1.0, functions = 1.0, statements = 1.0 }

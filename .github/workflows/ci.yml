@@ -9,69 +9,119 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: test
+  quality:
+    name: quality
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint
+      - name: Lint, format, and typecheck
         run: bun run check
 
-      - name: Typecheck
-        run: bun run typecheck
+      - name: Test with coverage
+        run: bun run test:coverage
 
-      - name: Test
-        run: bun test
+      - name: Build and inspect npm package
+        run: bun run pack:check
 
-      - name: Build
-        run: bun run build
+      - name: Upload build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-output
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Smoke-test built artifact under Node
-        run: |
-          node --version
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 7
+
+  compatibility:
+    name: node ${{ matrix.node }}
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: Download build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-output
+          path: dist
+
+      - name: Smoke-test public API
+        run: >-
           node -e "import('./dist/index.js').then(m => {
             const ok = m.readQueryParam('https://x.test/?q=hello+world', 'q') === 'hello world'
               && m.readPathname('https://x.test/api/v1') === '/api/v1'
               && m.readOrigin('https://x.test:8080/') === 'https://x.test:8080';
-            if (!ok) { console.error('smoke test failed'); process.exit(1); }
-            console.log('built artifact OK');
+            if (!ok) throw new Error('smoke test failed');
           })"
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
 
   bench:
     name: bench (cross-engine)
+    needs: quality
     runs-on: ubuntu-latest
-    # Run after tests pass so we don't burn ~5 min downloading browsers for a broken build.
-    needs: test
-    # Write access is needed only for the README auto-update step (push to main).
-    # On pull_request the job is still read-only — the commit step is conditional.
-    permissions:
-      contents: write
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # Need full ref so we can push back to main.
-          fetch-depth: 0
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -82,47 +132,68 @@ jobs:
         run: bunx playwright install --with-deps chromium firefox webkit
 
       - name: Run cross-engine benchmark
-        id: bench
         run: |
           set -o pipefail
           bun run bench 2>&1 | tee bench-output.txt
 
-      - name: Publish bench output to job summary
+      - name: Publish benchmark to job summary
         if: always()
         run: |
           {
             echo "## Cross-engine benchmark"
             echo ""
-            echo "Shared GitHub-hosted runners are noisy; treat absolute numbers as soft. The"
-            echo "speedup ratios (ours vs native) are what should stay stable across runs."
+            echo "Shared GitHub-hosted runners are noisy; treat absolute numbers as soft."
+            echo "Speedup ratios are expected to stay stable across runs."
             echo ""
             echo '```'
             cat bench-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload bench output artifact
+      - name: Upload benchmark output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench-output
           path: bench-output.txt
+          if-no-files-found: error
           retention-days: 30
 
-      - name: Update README with bench results
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  update-benchmark:
+    name: update benchmark documentation
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Download benchmark output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bench-output
+
+      - name: Update README
         run: bun scripts/update-readme-bench.ts bench-output.txt
 
       - name: Commit README if changed
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           if git diff --quiet -- README.md; then
-            echo "README bench block unchanged — no commit."
+            echo "README benchmark block unchanged."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md
-          # [skip ci] avoids triggering this same workflow recursively.
           git commit -m "ci(bench): update README benchmark table [skip ci]"
           git push

@@ -98,11 +98,21 @@ describe("readQueryParams", () => {
     expect(readQueryParams("https://example.com/?q=1", [])).toEqual([]);
   });
 
+  test("matches an empty parameter name in a batch", () => {
+    expect(
+      readQueryParams("https://example.com/?=value&a=1", ["", "a"])
+    ).toEqual(["value", "1"]);
+  });
+
   test("returns all nulls when there is no query string", () => {
     expect(readQueryParams("https://example.com/", ["a", "b"])).toEqual([
       null,
       null,
     ]);
+  });
+
+  test("delegates a single requested key to the single-key reader", () => {
+    expect(readQueryParams("https://example.com/?a=1", ["a"])).toEqual(["1"]);
   });
 
   test("matches keys in parallel-array order", () => {
@@ -149,6 +159,18 @@ describe("readQueryParams", () => {
     expect(
       readQueryParams("https://example.com/?flag&q=x", ["flag", "q"])
     ).toEqual(["", "x"]);
+  });
+
+  test("handles ambiguous keys in batches larger than the bit mask", () => {
+    const keys = Array.from({ length: 33 }, (_, i) => `missing-${i}`);
+    keys[32] = "%ZZ";
+    expect(readQueryParams("https://example.com/?%ZZ=ok", keys)[32]).toBe("ok");
+  });
+
+  test("tracks ambiguous keys in the normal batch bit mask", () => {
+    expect(
+      readQueryParams("https://example.com/?%ZZ=ok", ["%ZZ", "missing"])
+    ).toEqual(["ok", null]);
   });
 });
 
@@ -250,10 +272,21 @@ describe("setQueryParams", () => {
     expect(setQueryParams(u, {})).toBe(u);
   });
 
+  test("replaces an empty parameter name", () => {
+    expect(
+      setQueryParams("https://example.com/?=old&a=1", { "": "new", a: null })
+    ).toBe("https://example.com/?=new");
+  });
+
   test("sets multiple new params in one pass", () => {
     expect(setQueryParams("https://example.com/path", { a: "1", b: "2" })).toBe(
       "https://example.com/path?a=1&b=2"
     );
+  });
+
+  test("returns an unchanged queryless URL when every value is null", () => {
+    const url = "https://example.com/path";
+    expect(setQueryParams(url, { a: null, b: null })).toBe(url);
   });
 
   test("replaces existing values and appends missing ones", () => {
@@ -306,6 +339,24 @@ describe("setQueryParams", () => {
       setQueryParams("https://example.com/?a=1&b=2", { a: null, b: null })
     ).toBe("https://example.com/");
   });
+
+  test("rejects ambiguous byte matches while updating other fields", () => {
+    expect(
+      setQueryParams("https://example.com/?a%20b=old&q=1", {
+        "a%20b": "new",
+        q: "2",
+      })
+    ).toBe("https://example.com/?a%20b=old&q=2&a%2520b=new");
+  });
+
+  test("keeps plain fields when encoding elsewhere cannot produce a match", () => {
+    expect(
+      setQueryParams("https://example.com/?plain=1&encoded%20key=2", {
+        absent: "3",
+        other: null,
+      })
+    ).toBe("https://example.com/?plain=1&encoded%20key=2&absent=3");
+  });
 });
 
 describe("hasQueryParam", () => {
@@ -338,6 +389,11 @@ describe("hasQueryParam", () => {
 
   test("ignores a fragment-only ?", () => {
     expect(hasQueryParam("https://x.test/#frag?q=1", "q")).toBe(false);
+  });
+
+  test("handles ambiguous literal and unencoded misses", () => {
+    expect(hasQueryParam("https://x.test/?%ZZ=1", "%ZZ")).toBe(true);
+    expect(hasQueryParam("https://x.test/?plain=1", "%ZZ")).toBe(false);
   });
 
   test("is consistent with readQueryParam", () => {
@@ -472,6 +528,23 @@ describe("queryParamEquals", () => {
     expect(queryParamEquals("https://x.test/", "q", "x")).toBe(false);
   });
 
+  test("returns false when ? appears inside the fragment", () => {
+    expect(queryParamEquals("https://x.test/#frag?q=1", "q", "1")).toBe(false);
+  });
+
+  test("handles ambiguous keys and their decoded fallback", () => {
+    expect(queryParamEquals("https://x.test/?%ZZ=ok", "%ZZ", "ok")).toBe(true);
+    expect(queryParamEquals("https://x.test/?plain=ok", "%ZZ", "ok")).toBe(
+      false
+    );
+    expect(queryParamEquals("https://x.test/?a%2520b=ok", "a%20b", "ok")).toBe(
+      true
+    );
+    expect(
+      queryParamEquals("https://x.test/?encoded%20key=ok", "missing", "ok")
+    ).toBe(false);
+  });
+
   test("is consistent with readQueryParam for present keys", () => {
     const u = "https://x.test/?a=hello+world&b=caf%C3%A9";
     for (const k of ["a", "b"]) {
@@ -566,6 +639,20 @@ describe("removeQueryParam", () => {
       "https://x.test/#frag"
     );
   });
+
+  test("caches that an unencoded query cannot match decoded fallbacks", () => {
+    const url = "https://example.com/?longfield=1&otherlong=2";
+    expect(setQueryParams(url, { missing: null, absent: null })).toBe(url);
+  });
+
+  test("tracks matches beyond the 32-key seen mask", () => {
+    const params = Object.fromEntries(
+      Array.from({ length: 33 }, (_, i) => [`key-${i}`, null])
+    );
+    expect(setQueryParams("https://example.com/?key-32=old", params)).toBe(
+      "https://example.com/"
+    );
+  });
 });
 
 describe("removeQueryParams", () => {
@@ -576,6 +663,12 @@ describe("removeQueryParams", () => {
         ["utm_source", "utm_campaign"]
       )
     ).toBe("https://x.test/?q=hi&page=2");
+  });
+
+  test("removes an empty parameter name", () => {
+    expect(
+      removeQueryParams("https://x.test/?=value&a=1", ["", "missing"])
+    ).toBe("https://x.test/?a=1");
   });
 
   test("returns input unchanged when keys is empty", () => {
@@ -621,6 +714,28 @@ describe("removeQueryParams", () => {
     expect(removeQueryParams("https://x.test/?a%2Bb=1&c=2", ["a+b"])).toBe(
       "https://x.test/?c=2"
     );
+  });
+
+  test("returns the input when none of the bulk keys match", () => {
+    const url = "https://x.test/?a=1&b=2";
+    expect(removeQueryParams(url, ["missing", "other"])).toBe(url);
+  });
+
+  test("rejects ambiguous byte matches while removing another field", () => {
+    expect(
+      removeQueryParams("https://x.test/?a%20b=1&q=2", ["a%20b", "q"])
+    ).toBe("https://x.test/?a%20b=1");
+  });
+});
+
+describe("ambiguous readQueryParam keys", () => {
+  test("reads malformed literal keys with and without values", () => {
+    expect(readQueryParam("https://x.test/?%ZZ", "%ZZ")).toBe("");
+    expect(readQueryParam("https://x.test/?%ZZ=value", "%ZZ")).toBe("value");
+  });
+
+  test("returns null when an unencoded query cannot match", () => {
+    expect(readQueryParam("https://x.test/?plain=value", "%ZZ")).toBeNull();
   });
 });
 

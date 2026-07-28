@@ -1,0 +1,142 @@
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish npm package
+    if: github.event.release.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+    steps:
+      - name: Verify release prerequisites
+        shell: bash
+        run: |
+          if [[ "$REPOSITORY_PRIVATE" == "true" ]]; then
+            echo "npm provenance and GitHub attestations require a public repository."
+            exit 1
+          fi
+
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate release metadata
+        id: release
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$RELEASE_TAG" != "v$VERSION" ]]; then
+            echo "Release tag $RELEASE_TAG must match package version v$VERSION."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Release tag $RELEASE_TAG must point to a commit on main."
+            exit 1
+          fi
+          if [[ "$RELEASE_IS_PRERELEASE" == "true" && "$VERSION" != *-* ]]; then
+            echo "A GitHub prerelease requires a prerelease package version."
+            exit 1
+          fi
+          if [[ "$RELEASE_IS_PRERELEASE" != "true" && "$VERSION" == *-* ]]; then
+            echo "A prerelease package version requires a GitHub prerelease."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tarball=urlens-$VERSION.tgz" >> "$GITHUB_OUTPUT"
+          echo "sbom=urlens-$VERSION.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "checksums=urlens-$VERSION.sha256" >> "$GITHUB_OUTPUT"
+          if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run release checks
+        run: bun run ci
+
+      - name: Pack release artifact
+        run: npm pack
+
+      - name: Smoke-test packed artifact
+        env:
+          TARBALL: ${{ steps.release.outputs.tarball }}
+        run: |
+          mkdir package-test
+          tar -xzf "$TARBALL" -C package-test
+          node -e "import('./package-test/package/dist/index.js').then(m => {
+            if (m.readQueryParam('https://x.test/?q=release', 'q') !== 'release') {
+              throw new Error('packed artifact smoke test failed');
+            }
+          })"
+
+      - name: Generate CycloneDX SBOM and checksums
+        env:
+          CHECKSUMS: ${{ steps.release.outputs.checksums }}
+          SBOM: ${{ steps.release.outputs.sbom }}
+          TARBALL: ${{ steps.release.outputs.tarball }}
+        run: |
+          npm install --ignore-scripts
+          npm sbom --omit=dev --sbom-format=cyclonedx --sbom-type=library > "$SBOM"
+          sha256sum "$TARBALL" "$SBOM" > "$CHECKSUMS"
+
+      - name: Attest build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.release.outputs.tarball }}
+
+      - name: Attest SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.release.outputs.tarball }}
+          sbom-path: ${{ steps.release.outputs.sbom }}
+
+      - name: Attach artifacts to GitHub release
+        env:
+          CHECKSUMS: ${{ steps.release.outputs.checksums }}
+          GH_TOKEN: ${{ github.token }}
+          SBOM: ${{ steps.release.outputs.sbom }}
+          TARBALL: ${{ steps.release.outputs.tarball }}
+        run: gh release upload "$RELEASE_TAG" "$TARBALL" "$SBOM" "$CHECKSUMS" --clobber
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.release.outputs.npm_tag }}
+          TARBALL: ${{ steps.release.outputs.tarball }}
+        run: npm publish "$TARBALL" --access public --provenance --tag "$NPM_TAG"

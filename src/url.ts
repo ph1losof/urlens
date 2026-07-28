@@ -11,6 +11,7 @@ import {
   findAuthorityEnd,
   findSchemeEnd,
   parsePortRange,
+  SCHEME_CONT,
 } from "./internal.js";
 
 // Module-level scratch slots — same allocation-free pattern as LOC_Q/LOC_F in
@@ -90,13 +91,25 @@ function locatePathnameRange(rawUrl: string): void {
   const schemePos = findSchemeEnd(rawUrl);
   let pathStart: number;
   if (schemePos !== -1) {
-    const slash = rawUrl.indexOf("/", schemePos + 3);
-    if (slash === -1) {
-      PATH_S = rawUrl.length;
-      PATH_E = rawUrl.length;
+    const authorityStart = schemePos + 3;
+    const slash = rawUrl.indexOf("/", authorityStart);
+    let pathEnd = rawUrl.length;
+    const qPos = rawUrl.indexOf("?", authorityStart);
+    if (qPos !== -1) {
+      pathEnd = qPos;
+    }
+    const hPos = rawUrl.indexOf("#", authorityStart);
+    if (hPos !== -1 && hPos < pathEnd) {
+      pathEnd = hPos;
+    }
+    if (slash === -1 || slash >= pathEnd) {
+      PATH_S = pathEnd;
+      PATH_E = pathEnd;
       return;
     }
-    pathStart = slash;
+    PATH_S = slash;
+    PATH_E = pathEnd;
+    return;
   } else {
     pathStart = 0;
   }
@@ -135,11 +148,21 @@ export function readPathname(rawUrl: string): string {
   const schemePos = findSchemeEnd(rawUrl);
   let start: number;
   if (schemePos !== -1) {
-    const slash = rawUrl.indexOf("/", schemePos + 3);
-    if (slash === -1) {
+    const authorityStart = schemePos + 3;
+    const slash = rawUrl.indexOf("/", authorityStart);
+    let end = rawUrl.length;
+    const qPos = rawUrl.indexOf("?", authorityStart);
+    if (qPos !== -1) {
+      end = qPos;
+    }
+    const hPos = rawUrl.indexOf("#", authorityStart);
+    if (hPos !== -1 && hPos < end) {
+      end = hPos;
+    }
+    if (slash === -1 || slash >= end) {
       return "/";
     }
-    start = slash;
+    return rawUrl.substring(slash, end);
   } else {
     // No scheme: treat the input as a path (absolute if leading '/', relative
     // otherwise). Returning the literal substring is what request-line and
@@ -178,13 +201,14 @@ export function readOrigin(rawUrl: string): string {
 
   const authorityStart = schemePos + 3;
   const packed = findAuthorityEnd(rawUrl, authorityStart);
-  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+  const packBase = rawUrl.length < AUTH_PACK ? AUTH_PACK : rawUrl.length + 1;
+  const authorityEnd = packed < packBase ? packed : packed % packBase;
 
   // Strip userinfo. Per WHATWG URL, a literal '@' inside userinfo must be
   // percent-encoded, so the LAST literal '@' within the authority terminates
   // userinfo. IPv6 hosts ('[::1]') cannot contain '@', so this is also correct
   // for IPv6 without special casing.
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
+  const at = packed < packBase ? -1 : ((packed / packBase) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
 
   if (hostStart === authorityStart) {
@@ -208,8 +232,27 @@ export function readOrigin(rawUrl: string): string {
  *   readScheme("/relative/path");      // → ""
  */
 export function readScheme(rawUrl: string): string {
-  const schemePos = findSchemeEnd(rawUrl);
-  return schemePos === -1 ? "" : rawUrl.substring(0, schemePos);
+  const c0 = rawUrl.charCodeAt(0) | 32;
+  if (c0 < 97 || c0 > 122) {
+    return "";
+  }
+  const len = rawUrl.length;
+  for (let i = 1; i < len; i++) {
+    const c = rawUrl.charCodeAt(i);
+    if (c >= 97 && c <= 122) {
+      continue;
+    }
+    if (c === CH_COLON) {
+      return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
+        rawUrl.charCodeAt(i + 2) === CH_SLASH
+        ? rawUrl.substring(0, i)
+        : "";
+    }
+    if (c > 127 || SCHEME_CONT[c] === 0) {
+      return "";
+    }
+  }
+  return "";
 }
 
 /**
@@ -236,8 +279,9 @@ export function readHost(rawUrl: string): string {
   }
   const authorityStart = schemePos + 3;
   const packed = findAuthorityEnd(rawUrl, authorityStart);
-  const authorityEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-  const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
+  const packBase = rawUrl.length < AUTH_PACK ? AUTH_PACK : rawUrl.length + 1;
+  const authorityEnd = packed < packBase ? packed : packed % packBase;
+  const at = packed < packBase ? -1 : ((packed / packBase) | 0) - 1;
   const hostStart = at >= authorityStart ? at + 1 : authorityStart;
   return rawUrl.substring(hostStart, authorityEnd);
 }
@@ -328,7 +372,15 @@ export function hasScheme(rawUrl: string, scheme: string): boolean {
     return false;
   }
   for (let i = 0; i < schemePos; i++) {
-    if ((rawUrl.charCodeAt(i) | 32) !== (scheme.charCodeAt(i) | 32)) {
+    let actual = rawUrl.charCodeAt(i);
+    let expected = scheme.charCodeAt(i);
+    if (actual >= 65 && actual <= 90) {
+      actual += 32;
+    }
+    if (expected >= 65 && expected <= 90) {
+      expected += 32;
+    }
+    if (actual !== expected) {
       return false;
     }
   }
@@ -517,6 +569,9 @@ export function setScheme(rawUrl: string, scheme: string): string {
   if (schemePos === -1) {
     return rawUrl;
   }
+  if (schemePos === scheme.length && rawUrl.startsWith(scheme)) {
+    return rawUrl;
+  }
   return scheme + rawUrl.substring(schemePos);
 }
 
@@ -556,6 +611,13 @@ export function setPort(rawUrl: string, port: number | null): string {
     return rawUrl.substring(0, portColon) + rawUrl.substring(authorityEnd);
   }
   const portStr = String(port);
+  if (
+    portColon !== -1 &&
+    authorityEnd - portColon - 1 === portStr.length &&
+    rawUrl.startsWith(portStr, portColon + 1)
+  ) {
+    return rawUrl;
+  }
   if (portColon === -1) {
     // Insert ":port" right after the host.
     return (
@@ -596,7 +658,8 @@ export function setPathname(rawUrl: string, newPathname: string): string {
   let pathStart: number;
   if (schemePos !== -1) {
     const packed = findAuthorityEnd(rawUrl, schemePos + 3);
-    pathStart = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
+    const packBase = rawUrl.length < AUTH_PACK ? AUTH_PACK : rawUrl.length + 1;
+    pathStart = packed < packBase ? packed : packed % packBase;
   } else {
     pathStart = 0;
   }
@@ -608,6 +671,12 @@ export function setPathname(rawUrl: string, newPathname: string): string {
   const hPos = rawUrl.indexOf("#", pathStart);
   if (hPos !== -1 && hPos < pathEnd) {
     pathEnd = hPos;
+  }
+  if (
+    pathEnd - pathStart === normalized.length &&
+    rawUrl.startsWith(normalized, pathStart)
+  ) {
+    return rawUrl;
   }
   return (
     rawUrl.substring(0, pathStart) + normalized + rawUrl.substring(pathEnd)

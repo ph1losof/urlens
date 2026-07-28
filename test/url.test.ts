@@ -30,6 +30,11 @@ describe("readPathname", () => {
     expect(readPathname("https://example.com?q=1")).toBe("/");
   });
 
+  test("does not treat a slash inside the query or fragment as a path", () => {
+    expect(readPathname("https://example.com?next=/a")).toBe("/");
+    expect(readPathname("https://example.com#section/a")).toBe("/");
+  });
+
   test("parses pathname from a path-only URL", () => {
     expect(readPathname("/bench?x=1")).toBe("/bench");
     expect(readPathname("/")).toBe("/");
@@ -68,6 +73,14 @@ describe("readOrigin", () => {
     expect(readOrigin("http://localhost:3000/path")).toBe(
       "http://localhost:3000"
     );
+  });
+
+  test("handles authorities longer than the packed-offset fast path", () => {
+    const hostname = "a".repeat(0x20_0000);
+    const url = `https://${hostname}/path`;
+    expect(readHost(url).length).toBe(hostname.length);
+    expect(readOrigin(url).length).toBe("https://".length + hostname.length);
+    expect(setPathname(url, "/next").endsWith("/next")).toBe(true);
   });
 
   test("returns empty string for path-only URLs", () => {
@@ -190,6 +203,10 @@ describe("readHostname", () => {
     expect(readHostname("/path")).toBe("");
     expect(readHostname("example.com")).toBe("");
   });
+
+  test("returns malformed bracketed authorities verbatim", () => {
+    expect(readHostname("https://[::1/path")).toBe("[::1");
+  });
 });
 
 describe("readPort", () => {
@@ -277,6 +294,11 @@ describe("setPathname", () => {
       "https://user@[::1]:8080/new"
     );
   });
+
+  test("returns the input when the normalized pathname is unchanged", () => {
+    const url = "https://example.com/path?q=1#frag";
+    expect(setPathname(url, "/path")).toBe(url);
+  });
 });
 
 describe("hasScheme", () => {
@@ -310,6 +332,13 @@ describe("hasScheme", () => {
   test("rejects schemes that differ on more than case", () => {
     expect(hasScheme("https://x.test/", "ftps")).toBe(false);
     expect(hasScheme("https-x://x.test/", "https")).toBe(false);
+    expect(hasScheme("http://x.test/", "htxp")).toBe(false);
+  });
+
+  test("does not fold invalid control bytes onto scheme punctuation", () => {
+    expect(hasScheme("a+://x.test/", `a${String.fromCharCode(11)}`)).toBe(
+      false
+    );
   });
 });
 
@@ -342,9 +371,19 @@ describe("pathnameStartsWith", () => {
     );
   });
 
+  test("does not match a slash inside an origin-only URL's query", () => {
+    expect(pathnameStartsWith("https://x.test?next=/api", "/api")).toBe(false);
+  });
+
+  test("uses a fragment as the pathname boundary when there is no query", () => {
+    expect(pathnameStartsWith("https://x.test/api#frag", "/api")).toBe(true);
+  });
+
   test("works on path-only URLs", () => {
     expect(pathnameStartsWith("/api/v1", "/api")).toBe(true);
     expect(pathnameStartsWith("api/v1", "api")).toBe(true);
+    expect(pathnameStartsWith("/api?q=1", "/api")).toBe(true);
+    expect(pathnameStartsWith("/api#frag", "/api")).toBe(true);
   });
 
   test("returns false when prefix is longer than path", () => {
@@ -369,6 +408,12 @@ describe("pathnameEndsWith", () => {
     );
   });
 
+  test("does not match a slash inside an origin-only URL's fragment", () => {
+    expect(pathnameEndsWith("https://x.test#next/index.html", ".html")).toBe(
+      false
+    );
+  });
+
   test("treats an origin-only URL as path '/'", () => {
     expect(pathnameEndsWith("https://x.test", "/")).toBe(true);
     expect(pathnameEndsWith("https://x.test", "")).toBe(true);
@@ -389,10 +434,14 @@ describe("originMatches", () => {
 
   test("returns false for different schemes", () => {
     expect(originMatches("https://x.test/", "http://x.test/")).toBe(false);
+    expect(originMatches("http://x.test/", "htxp://x.test/")).toBe(false);
   });
 
   test("returns false for different hostnames", () => {
     expect(originMatches("https://a.test/", "https://b.test/")).toBe(false);
+    expect(originMatches("https://short.test/", "https://longer.test/")).toBe(
+      false
+    );
   });
 
   test("infers implicit ports for special schemes", () => {
@@ -419,6 +468,12 @@ describe("originMatches", () => {
       true
     );
     expect(originMatches("custom://x.test/", "custom://x.test/")).toBe(true);
+    expect(originMatches("custom://x.test/", "custom://x.test:9/")).toBe(false);
+  });
+
+  test("returns false for malformed explicit ports", () => {
+    expect(originMatches("https://x.test:bad/", "https://x.test/")).toBe(false);
+    expect(originMatches("https://x.test/", "https://x.test:bad/")).toBe(false);
   });
 
   test("scheme comparison is case-insensitive", () => {
@@ -431,6 +486,9 @@ describe("originMatches", () => {
       true
     );
     expect(originMatches("https://Example.COM/", "https://example.com/")).toBe(
+      true
+    );
+    expect(originMatches("https://example.com/", "https://EXAMPLE.COM/")).toBe(
       true
     );
   });
@@ -525,6 +583,11 @@ describe("setScheme", () => {
     const u = setScheme("https://x.test/", "ws");
     expect(readScheme(u)).toBe("ws");
   });
+
+  test("returns the input when the scheme is unchanged", () => {
+    const url = "https://x.test/path";
+    expect(setScheme(url, "https")).toBe(url);
+  });
 });
 
 describe("setPort", () => {
@@ -587,6 +650,11 @@ describe("setPort", () => {
   test("accepts 0 and 65535", () => {
     expect(setPort("https://x.test/", 0)).toBe("https://x.test:0/");
     expect(setPort("https://x.test/", 65535)).toBe("https://x.test:65535/");
+  });
+
+  test("returns the input when the explicit port is unchanged", () => {
+    const url = "https://x.test:8080/path";
+    expect(setPort(url, 8080)).toBe(url);
   });
 });
 

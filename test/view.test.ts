@@ -207,6 +207,12 @@ describe("UrlView.queryParams()", () => {
     expect(out.utm_source).toBe("ig");
   });
 
+  test("matches an empty parameter name", () => {
+    const out = view("https://x/?=value&a=1").queryParams(["", "a"] as const);
+    expect(out[""]).toBe("value");
+    expect(out.a).toBe("1");
+  });
+
   test("returns null for missing keys", () => {
     const v = view("https://x/r?q=hi");
     const out = v.queryParams(["q", "missing"] as const);
@@ -483,8 +489,7 @@ describe("UrlView edge cases", () => {
   });
 
   test("handles a URL with malformed IPv6 (missing close bracket)", () => {
-    // Should not throw — falls through to best-effort behavior.
-    expect(() => view("https://[::1/path").hostname()).not.toThrow();
+    expect(view("https://[::1/path").hostname()).toBe("[::1");
   });
 
   test("handles fragment-only input", () => {

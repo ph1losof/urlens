@@ -53,4 +53,8 @@ describe("decodeQueryComponent", () => {
   test("handles + adjacent to valid UTF-8 escapes", () => {
     expect(decodeQueryComponent("+%C3%A9+")).toBe(" é ");
   });
+
+  test("flushes decoded bytes before + on the tolerant path", () => {
+    expect(decodeQueryComponent("%ZZ%41+")).toBe("%ZZA ");
+  });
 });

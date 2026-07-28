@@ -1,10 +1,11 @@
 import { decodeRange } from "./decode.js";
 import {
-  AUTH_PACK,
   CH_AMP,
   CH_COLON,
+  CH_HASH,
   CH_OPEN_BRACKET,
-  findAuthorityEnd,
+  CH_QUESTION,
+  CH_SLASH,
   findKeyMatch,
   findSchemeEnd,
   parsePortRange,
@@ -55,7 +56,7 @@ export class UrlView {
   // for callers, which is sufficient. `#private` access goes through a
   // WeakMap-style guard in the engines and is measurably slower in tight loops.
   private readonly _raw: string;
-  private readonly _len: number;
+  private readonly _queryEnd: number;
   private readonly _schemeEnd: number;
   private readonly _hostStart: number;
   private readonly _hostEnd: number;
@@ -81,10 +82,22 @@ export class UrlView {
       authEnd = 0;
     } else {
       const authStart = schemePos + 3;
-      const packed = findAuthorityEnd(rawUrl, authStart);
-      authEnd = packed < AUTH_PACK ? packed : packed % AUTH_PACK;
-      const at = packed < AUTH_PACK ? -1 : ((packed / AUTH_PACK) | 0) - 1;
-      hostStart = at >= authStart ? at + 1 : authStart;
+      authEnd = len;
+      hostStart = authStart;
+      let firstColon = -1;
+      for (let i = authStart; i < len; i++) {
+        const c = rawUrl.charCodeAt(i);
+        if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
+          authEnd = i;
+          break;
+        }
+        if (c === 64 /* @ */) {
+          hostStart = i + 1;
+          firstColon = -1;
+        } else if (c === CH_COLON && firstColon === -1) {
+          firstColon = i;
+        }
+      }
 
       if (rawUrl.charCodeAt(hostStart) === CH_OPEN_BRACKET) {
         const close = rawUrl.indexOf("]", hostStart + 1);
@@ -99,10 +112,9 @@ export class UrlView {
               : -1;
         }
       } else {
-        const colon = rawUrl.indexOf(":", hostStart);
-        if (colon !== -1 && colon < authEnd) {
-          hostEnd = colon;
-          portColon = colon;
+        if (firstColon !== -1) {
+          hostEnd = firstColon;
+          portColon = firstColon;
         } else {
           hostEnd = authEnd;
           portColon = -1;
@@ -130,7 +142,7 @@ export class UrlView {
     // Assign in the same order every time. The JIT pins this layout to a
     // single hidden class across all UrlView instances.
     this._raw = rawUrl;
-    this._len = len;
+    this._queryEnd = fragStart !== -1 ? fragStart : len;
     this._schemeEnd = schemePos;
     this._hostStart = hostStart;
     this._hostEnd = hostEnd;
@@ -182,8 +194,10 @@ export class UrlView {
     }
     const raw = this._raw;
     if (raw.charCodeAt(this._hostStart) === CH_OPEN_BRACKET) {
-      // _hostEnd points one past the ']'. Strip both brackets.
-      return raw.substring(this._hostStart + 1, this._hostEnd - 1);
+      if (raw.charCodeAt(this._hostEnd - 1) === 93 /* ] */) {
+        return raw.substring(this._hostStart + 1, this._hostEnd - 1);
+      }
+      return raw.substring(this._hostStart, this._authEnd);
     }
     return raw.substring(this._hostStart, this._hostEnd);
   }
@@ -200,12 +214,7 @@ export class UrlView {
   /** Returns the pathname (e.g. `"/api/v1"`), or `"/"` if absent. */
   pathname(): string {
     const start = this._authEnd;
-    const end =
-      this._queryStart !== -1
-        ? this._queryStart
-        : this._fragStart !== -1
-          ? this._fragStart
-          : this._len;
+    const end = this._queryStart !== -1 ? this._queryStart : this._queryEnd;
     return end === start ? "/" : this._raw.substring(start, end);
   }
 
@@ -214,15 +223,14 @@ export class UrlView {
     if (this._queryStart === -1) {
       return "";
     }
-    const end = this._fragStart !== -1 ? this._fragStart : this._len;
-    return this._raw.substring(this._queryStart + 1, end);
+    return this._raw.substring(this._queryStart + 1, this._queryEnd);
   }
 
   /** Returns the fragment without the leading `#`, or `""` if absent. */
   fragment(): string {
     return this._fragStart === -1
       ? ""
-      : this._raw.substring(this._fragStart + 1, this._len);
+      : this._raw.substring(this._fragStart + 1);
   }
 
   /**
@@ -240,7 +248,7 @@ export class UrlView {
       return null;
     }
     const raw = this._raw;
-    const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const end = this._queryEnd;
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
 
@@ -326,7 +334,7 @@ export class UrlView {
     }
 
     const raw = this._raw;
-    const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const end = this._queryEnd;
 
     // Pack (firstChar << 16 | length) per key — inner-loop prefilter is one
     // int compare instead of two array reads + two compares. The `-1`
@@ -338,7 +346,10 @@ export class UrlView {
     const useAmbigMask = n <= 32;
     let keyAmbigMask = 0;
     for (let k = 0; k < n; k++) {
-      keyPacked[k] = keys[k].charCodeAt(0) * 65536 + keys[k].length;
+      keyPacked[k] =
+        keys[k].length === 0
+          ? 0
+          : keys[k].charCodeAt(0) * 65536 + keys[k].length;
       if (useAmbigMask && keyIsAmbiguous(keys[k])) {
         keyAmbigMask |= 1 << k;
       }
@@ -354,7 +365,8 @@ export class UrlView {
       }
       const eq = raw.indexOf("=", i);
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
-      const fieldPacked = raw.charCodeAt(i) * 65536 + (keyEnd - i);
+      const fieldPacked =
+        keyEnd === i ? 0 : raw.charCodeAt(i) * 65536 + (keyEnd - i);
 
       for (let k = 0; k < n; k++) {
         if (keyPacked[k] !== fieldPacked) {
@@ -418,7 +430,7 @@ export class UrlView {
       return false;
     }
     const raw = this._raw;
-    const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const end = this._queryEnd;
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
 
@@ -467,7 +479,7 @@ export class UrlView {
       return false;
     }
     const raw = this._raw;
-    const end = this._fragStart !== -1 ? this._fragStart : this._len;
+    const end = this._queryEnd;
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
 
@@ -533,12 +545,7 @@ export class UrlView {
   // fallow-ignore-next-line complexity
   pathnameStartsWith(prefix: string): boolean {
     const start = this._authEnd;
-    const end =
-      this._queryStart !== -1
-        ? this._queryStart
-        : this._fragStart !== -1
-          ? this._fragStart
-          : this._len;
+    const end = this._queryStart !== -1 ? this._queryStart : this._queryEnd;
     const pathLen = end - start;
     if (pathLen === 0) {
       return prefix.length === 0 || prefix === "/";
@@ -553,12 +560,7 @@ export class UrlView {
   // fallow-ignore-next-line complexity
   pathnameEndsWith(suffix: string): boolean {
     const start = this._authEnd;
-    const end =
-      this._queryStart !== -1
-        ? this._queryStart
-        : this._fragStart !== -1
-          ? this._fragStart
-          : this._len;
+    const end = this._queryStart !== -1 ? this._queryStart : this._queryEnd;
     const pathLen = end - start;
     if (pathLen === 0) {
       return suffix.length === 0 || suffix === "/";

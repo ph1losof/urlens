@@ -35,14 +35,15 @@
   "assist": {
     "actions": {
       "source": {
-        "organizeImports": "on"
+        "organizeImports": "on",
+        "useSortedPackageJson": "on"
       }
     }
   },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "complexity": {
         "noExcessiveCognitiveComplexity": "off",
         "noForEach": "error",

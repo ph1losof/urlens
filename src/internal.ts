@@ -19,7 +19,7 @@ const CH_AT = 64;
 // "+" / "-" / ".". Indexed by char code; 1 = allowed, 0 = not. A single table
 // read per char beats a branch ladder of range/equality comparisons in the hot
 // scheme-detection path (see findSchemeEnd).
-const SCHEME_CONT = new Uint8Array(128);
+export const SCHEME_CONT = new Uint8Array(128);
 for (let c = 48 /* 0 */; c <= 57 /* 9 */; c++) {
   SCHEME_CONT[c] = 1;
 }
@@ -63,21 +63,20 @@ export function findSchemeEnd(rawUrl: string): number {
   const len = rawUrl.length;
   for (let i = 1; i < len; i++) {
     const c = rawUrl.charCodeAt(i);
-    // Fast path: lowercase ASCII letter — by far the most common scheme byte
-    // (http, https, ftp, ws, wss, file, ...). One range check, no table load.
-    if (c >= 97 && c <= 122) {
-      continue;
-    }
-    if (c === CH_COLON) {
-      // Scheme separator only if followed by "//"; otherwise no authority form
-      // (e.g. "mailto:foo") and we report schemeless, matching old indexOf.
-      return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
-        rawUrl.charCodeAt(i + 2) === CH_SLASH
-        ? i
-        : -1;
-    }
-    if (c > 127 || SCHEME_CONT[c] === 0) {
-      return -1;
+    // Lowercase ASCII letters are the fast path. Only other bytes need the
+    // separator and continuation-table checks.
+    if (c < 97 || c > 122) {
+      if (c === CH_COLON) {
+        // Scheme separator only if followed by "//"; otherwise no authority form
+        // (e.g. "mailto:foo") and we report schemeless, matching old indexOf.
+        return rawUrl.charCodeAt(i + 1) === CH_SLASH &&
+          rawUrl.charCodeAt(i + 2) === CH_SLASH
+          ? i
+          : -1;
+      }
+      if (c > 127 || SCHEME_CONT[c] === 0) {
+        return -1;
+      }
     }
   }
   return -1;
@@ -122,6 +121,7 @@ export function findKeyMatch(
   }
   // Stage 2: SIMD indexOf scan over the remaining range.
   let pos = start + 1;
+  let match = -1;
   while (pos < end) {
     const idx = rawUrl.indexOf(key, pos);
     if (idx === -1 || idx + keyLen > end) {
@@ -130,23 +130,23 @@ export function findKeyMatch(
     const prev = rawUrl.charCodeAt(idx - 1);
     if (prev === CH_QUESTION || prev === CH_AMP) {
       const after = idx + keyLen;
-      if (after === end) {
-        return idx;
-      }
-      const next = rawUrl.charCodeAt(after);
+      const next = after === end ? CH_EQ : rawUrl.charCodeAt(after);
       if (next === CH_EQ || next === CH_AMP) {
-        return idx;
+        match = idx;
+        pos = end;
+      } else {
+        pos = idx + 1;
       }
+    } else {
+      pos = idx + 1;
     }
-    pos = idx + 1;
   }
-  return -1;
+  return match;
 }
 
-// Multiplier used to pack two authority offsets into one return value (see
-// findAuthorityEnd). Both packed offsets are in [0, len], so the encoding stays
-// exact within Number.MAX_SAFE_INTEGER (2^53) as long as len < 2^21 (~2M chars)
-// — far beyond any realistic URL.
+// Default multiplier used to pack two authority offsets into one return value
+// (see findAuthorityEnd). URLs below this length stay in the Smi-optimized
+// representation. Longer inputs use `len + 1` as an unambiguous cold-path base.
 //
 // 2^21 (not a larger power) is deliberate: the packed value must stay a V8 Smi
 // (31-bit, < 2^30) to keep the call-site decode in fast integer arithmetic. A
@@ -159,7 +159,8 @@ export const AUTH_PACK = 0x200000; // 2^21
 // Returns the authority boundary AND the last-'@' position packed into one
 // integer, computed in a single linear pass:
 //
-//   packed = (lastAt + 1) * AUTH_PACK + authEnd
+//   base   = len < AUTH_PACK ? AUTH_PACK : len + 1
+//   packed = (lastAt + 1) * base + authEnd
 //
 //   • authEnd: index of the first '/', '?', or '#' at or after `start`, or the
 //     string length if none are present. One pass beats three separate indexOf
@@ -170,24 +171,25 @@ export const AUTH_PACK = 0x200000; // 2^21
 //     but is folded into this scan — avoiding a second backward scan whose range
 //     is wasted for the common URLs that have no userinfo.
 //
-// Decode at the call site (the quotient `lastAt + 1` is < 2^21, so `| 0` is a
-// safe 32-bit truncation; never apply bitwise ops to the full packed value):
-//   const authEnd = packed % AUTH_PACK;
-//   const lastAt  = ((packed / AUTH_PACK) | 0) - 1;
+// Decode at the call site using the same base (the quotient is a safe 32-bit
+// authority offset; never apply bitwise ops to the full packed value):
+//   const authEnd = packed % base;
+//   const lastAt  = ((packed / base) | 0) - 1;
 // fallow-ignore-next-line complexity
 export function findAuthorityEnd(rawUrl: string, start: number): number {
   const len = rawUrl.length;
+  const base = len < AUTH_PACK ? AUTH_PACK : len + 1;
   let lastAt = -1;
   for (let i = start; i < len; i++) {
     const c = rawUrl.charCodeAt(i);
     if (c === CH_SLASH || c === CH_QUESTION || c === CH_HASH) {
-      return (lastAt + 1) * AUTH_PACK + i;
+      return (lastAt + 1) * base + i;
     }
     if (c === CH_AT) {
       lastAt = i;
     }
   }
-  return (lastAt + 1) * AUTH_PACK + len;
+  return (lastAt + 1) * base + len;
 }
 
 // Returns the WHATWG default port for a "special" scheme: http=80, https=443,

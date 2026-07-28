@@ -17,6 +17,7 @@ let DECODE_BYTES = new Uint8Array(64);
 export function decodeRange(s: string, start: number, end: number): string {
   let pct = false;
   let plus = false;
+  let firstPlus = -1;
   let malformedEscape = false;
   for (let p = start; p < end; p++) {
     const c = s.charCodeAt(p);
@@ -36,6 +37,9 @@ export function decodeRange(s: string, start: number, end: number): string {
       }
     } else if (c === CH_PLUS) {
       plus = true;
+      if (firstPlus === -1) {
+        firstPlus = p;
+      }
       if (pct) {
         break;
       }
@@ -46,7 +50,7 @@ export function decodeRange(s: string, start: number, end: number): string {
   }
   if (!pct) {
     // '+' only — substitute via a single-pass char walker (no regex).
-    return plusToSpace(s, start, end);
+    return plusToSpace(s, start, end, firstPlus);
   }
   // Invalid % syntax would make decodeURIComponent throw. Detecting it in the
   // scan we already perform avoids constructing an intermediate string and an
@@ -56,13 +60,15 @@ export function decodeRange(s: string, start: number, end: number): string {
   }
   // Has '%'. Substitute any '+' first (form-urlencoded semantics), then try
   // the native decoder. On malformed escapes, fall through to tolerant decode.
-  const prepared = plus ? plusToSpace(s, start, end) : s.substring(start, end);
+  const prepared = plus
+    ? plusToSpace(s, start, end, firstPlus)
+    : s.substring(start, end);
   try {
     return decodeURIComponent(prepared);
   } catch {
     // Fall through.
   }
-  return tolerantDecode(prepared, 0, prepared.length);
+  return tolerantDecode(s, start, end);
 }
 
 // Replaces every '+' in `s[start..end)` with a space. Caller has already
@@ -70,10 +76,15 @@ export function decodeRange(s: string, start: number, end: number): string {
 // stitching together sliced substrings — each substring is a "sliced string"
 // in V8/SM/JSC (no byte copy), so the only real allocation is the final
 // flattened string.
-function plusToSpace(s: string, start: number, end: number): string {
-  let out = "";
-  let runStart = start;
-  for (let i = start; i < end; i++) {
+function plusToSpace(
+  s: string,
+  start: number,
+  end: number,
+  firstPlus: number
+): string {
+  let out = s.substring(start, firstPlus);
+  let runStart = firstPlus;
+  for (let i = firstPlus; i < end; i++) {
     if (s.charCodeAt(i) === CH_PLUS) {
       out += s.substring(runStart, i);
       out += " ";
@@ -90,17 +101,22 @@ function plusToSpace(s: string, start: number, end: number): string {
 // fallow-ignore-next-line complexity
 function tolerantDecode(raw: string, start: number, end: number): string {
   let out = "";
+  let bytes = DECODE_BYTES;
   let byteCount = 0;
+  let literalStart = start;
 
   for (let i = start; i < end; i++) {
     const c = raw.charCodeAt(i);
 
     if (c === CH_PLUS) {
       if (byteCount !== 0) {
-        out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+        out += UTF8_DECODER.decode(bytes.subarray(0, byteCount));
         byteCount = 0;
+      } else if (literalStart < i) {
+        out += raw.substring(literalStart, i);
       }
       out += " ";
+      literalStart = i + 1;
       continue;
     }
 
@@ -108,26 +124,35 @@ function tolerantDecode(raw: string, start: number, end: number): string {
       const hi = hexNibble(raw.charCodeAt(i + 1));
       const lo = hexNibble(raw.charCodeAt(i + 2));
       if (hi !== -1 && lo !== -1) {
-        if (byteCount === DECODE_BYTES.length) {
-          const grown = new Uint8Array(byteCount * 2);
-          grown.set(DECODE_BYTES);
-          DECODE_BYTES = grown;
+        if (byteCount === 0 && literalStart < i) {
+          out += raw.substring(literalStart, i);
         }
-        DECODE_BYTES[byteCount++] = (hi << 4) | lo;
+        if (byteCount === bytes.length) {
+          const grown = new Uint8Array(byteCount * 2);
+          grown.set(bytes);
+          bytes = grown;
+          if (bytes.length <= 4096) {
+            DECODE_BYTES = bytes;
+          }
+        }
+        bytes[byteCount++] = (hi << 4) | lo;
         i += 2;
+        literalStart = i + 1;
         continue;
       }
     }
 
     if (byteCount !== 0) {
-      out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+      out += UTF8_DECODER.decode(bytes.subarray(0, byteCount));
       byteCount = 0;
+      literalStart = i;
     }
-    out += raw[i];
   }
 
   if (byteCount !== 0) {
-    out += UTF8_DECODER.decode(DECODE_BYTES.subarray(0, byteCount));
+    out += UTF8_DECODER.decode(bytes.subarray(0, byteCount));
+  } else if (literalStart < end) {
+    out += raw.substring(literalStart, end);
   }
   return out;
 }

@@ -20,6 +20,7 @@ if (!build.success) {
 const benchSrc = await build.outputs[0].text();
 const benchFilter = process.env.URLENS_BENCH_FILTER ?? "";
 const benchBudget = Number(process.env.URLENS_BENCH_BUDGET ?? 600);
+const engineFilter = (process.env.URLENS_BENCH_ENGINE ?? "").toLowerCase();
 
 // The harness calls `print(...)` to emit lines. We override `globalThis.print`
 // before eval so each line lands in `__lines`, then return the joined text to
@@ -46,9 +47,6 @@ const engines: EngineLabel[] = [
   { name: "WebKit (JavaScriptCore)", launcher: webkit },
 ];
 
-// Run all three engines concurrently — they're fully independent and the
-// inner page.evaluate is the dominant cost. Collect each engine's output
-// into a buffer so the printed blocks stay grouped instead of interleaving.
 async function runEngine({ launcher }: EngineLabel): Promise<string> {
   const browser = await launcher.launch();
   try {
@@ -61,14 +59,17 @@ async function runEngine({ launcher }: EngineLabel): Promise<string> {
   }
 }
 
-const settled = await Promise.allSettled(engines.map(runEngine));
-for (let i = 0; i < engines.length; i++) {
-  const { name } = engines[i];
+// Benchmark engines sequentially. Concurrent browser processes contend for
+// the same CPU and make the small deltas this harness measures unreliable.
+for (const engine of engines) {
+  const { name } = engine;
+  if (engineFilter && !name.toLowerCase().includes(engineFilter)) {
+    continue;
+  }
   console.log(`\n======== ${name} ========`);
-  const r = settled[i];
-  if (r.status === "fulfilled") {
-    console.log(r.value);
-  } else {
-    console.error(`[${name}] error:`, r.reason);
+  try {
+    console.log(await runEngine(engine));
+  } catch (error) {
+    console.error(`[${name}] error:`, error);
   }
 }
