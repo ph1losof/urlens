@@ -1,0 +1,6 @@
+node_modules
+dist
+coverage
+bench-output.txt
+.DS_Store
+*.log

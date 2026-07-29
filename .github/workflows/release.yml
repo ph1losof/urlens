@@ -1,0 +1,387 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version to publish (without the v prefix)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build release artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      checksums: ${{ steps.metadata.outputs.checksums }}
+      npm_tag: ${{ steps.metadata.outputs.npm_tag }}
+      package_name: ${{ steps.metadata.outputs.package_name }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      sbom: ${{ steps.metadata.outputs.sbom }}
+      tag: ${{ steps.request.outputs.tag }}
+      tarball: ${{ steps.metadata.outputs.tarball }}
+      version: ${{ steps.request.outputs.version }}
+    env:
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Verify publication prerequisites
+        id: request
+        env:
+          DISPATCH_REF: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REPOSITORY_PRIVATE" == "true" ]]; then
+            echo "npm provenance and GitHub attestations require a public repository."
+            exit 1
+          fi
+          if [[ "$DISPATCH_REF" != "main" ]]; then
+            echo "Dispatch releases from the protected main branch."
+            exit 1
+          fi
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "$REQUESTED_VERSION" =~ $SEMVER_RE ]]; then
+            echo "Version must be canonical SemVer without a v prefix or build metadata."
+            exit 1
+          fi
+          if [[ "$REQUESTED_VERSION" == *-* ]]; then
+            IFS='.' read -ra PRERELEASE_PARTS <<< "${REQUESTED_VERSION#*-}"
+            for part in "${PRERELEASE_PARTS[@]}"; do
+              if [[ "$part" =~ ^[0-9]+$ && "$part" == 0* && "$part" != "0" ]]; then
+                echo "Numeric prerelease identifiers must not contain leading zeroes."
+                exit 1
+              fi
+            done
+          fi
+          echo "version=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout and validate release tag
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          TAG_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+          if [[ "$TAG_SHA" != "$GITHUB_SHA" ]]; then
+            echo "Release tag $RELEASE_TAG must point to the exact selected main commit $GITHUB_SHA."
+            exit 1
+          fi
+          git checkout --detach "$RELEASE_TAG"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Pin npm CLI
+        run: |
+          npm install --global npm@11.5.1
+          test "$(npm --version)" = "11.5.1"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate release metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+          VERSION: ${{ steps.request.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$PACKAGE_NAME" != "urlens" ]]; then
+            echo "Expected package name urlens, found $PACKAGE_NAME."
+            exit 1
+          fi
+          if [[ "$PACKAGE_VERSION" != "$VERSION" || "$RELEASE_TAG" != "v$PACKAGE_VERSION" ]]; then
+            echo "Input $VERSION, tag $RELEASE_TAG, and package version $PACKAGE_VERSION must match exactly."
+            exit 1
+          fi
+          HEADING_PREFIX="## [$VERSION] - "
+          if [[ "$(grep -Fc "$HEADING_PREFIX" CHANGELOG.md)" != "1" ]]; then
+            echo "CHANGELOG.md must contain a dated [$VERSION] release heading."
+            exit 1
+          fi
+          RELEASE_HEADING="$(grep -F "$HEADING_PREFIX" CHANGELOG.md)"
+          RELEASE_DATE="${RELEASE_HEADING#"$HEADING_PREFIX"}"
+          if [[ ! "$RELEASE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "CHANGELOG.md must contain a dated [$VERSION] release heading."
+            exit 1
+          fi
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "tarball=urlens-$VERSION.tgz" >> "$GITHUB_OUTPUT"
+          echo "sbom=urlens-$VERSION.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "checksums=urlens-$VERSION.sha256" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run release checks
+        run: bun run ci
+
+      - name: Pack release artifact
+        env:
+          EXPECTED_TARBALL: ${{ steps.metadata.outputs.tarball }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-artifacts
+          npm pack --json --ignore-scripts --pack-destination release-artifacts > "$RUNNER_TEMP/npm-pack.json"
+          TARBALL="$(node -e 'const p=require(process.argv[1]); process.stdout.write(p[0].filename)' "$RUNNER_TEMP/npm-pack.json")"
+          INTEGRITY="$(node -e 'const p=require(process.argv[1]); process.stdout.write(p[0].integrity)' "$RUNNER_TEMP/npm-pack.json")"
+          if [[ "$TARBALL" != "$EXPECTED_TARBALL" || ! -f "release-artifacts/$TARBALL" ]]; then
+            echo "Expected packed artifact $EXPECTED_TARBALL, found $TARBALL."
+            exit 1
+          fi
+          printf '%s\n' "$INTEGRITY" > release-artifacts/npm-integrity.txt
+
+      - name: Smoke-test packed artifact
+        env:
+          TARBALL: ${{ steps.metadata.outputs.tarball }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/package-test"
+          tar -xzf "release-artifacts/$TARBALL" -C "$RUNNER_TEMP/package-test"
+          node -e "import('$RUNNER_TEMP/package-test/package/dist/index.js').then(m => {
+            if (m.readQueryParam('https://x.test/?q=release', 'q') !== 'release') {
+              throw new Error('packed artifact smoke test failed');
+            }
+          })"
+
+      - name: Generate CycloneDX SBOM and checksums
+        env:
+          CHECKSUMS: ${{ steps.metadata.outputs.checksums }}
+          SBOM: ${{ steps.metadata.outputs.sbom }}
+          TARBALL: ${{ steps.metadata.outputs.tarball }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts --package-lock-only
+          npm sbom --omit=dev --sbom-format=cyclonedx --sbom-type=library > "release-artifacts/$SBOM"
+          cd release-artifacts
+          sha256sum "$TARBALL" "$SBOM" > "$CHECKSUMS"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ steps.request.outputs.version }}
+          path: release-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish npm package
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Pin npm CLI
+        run: |
+          npm install --global npm@11.5.1
+          test "$(npm --version)" = "11.5.1"
+
+      - name: Download release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ needs.build.outputs.version }}
+          path: release-artifacts
+
+      - name: Check npm registry integrity
+        id: registry
+        env:
+          PACKAGE_NAME: ${{ needs.build.outputs.package_name }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_INTEGRITY="$(<release-artifacts/npm-integrity.txt)"
+          ERROR_FILE="$RUNNER_TEMP/npm-view-error.txt"
+          set +e
+          REGISTRY_INTEGRITY="$(npm view "$PACKAGE_NAME@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>"$ERROR_FILE")"
+          STATUS=$?
+          set -e
+          if [[ $STATUS -eq 0 ]]; then
+            if [[ "$REGISTRY_INTEGRITY" != "$EXPECTED_INTEGRITY" ]]; then
+              echo "Published $PACKAGE_NAME@$VERSION does not match the candidate tarball integrity."
+              exit 1
+            fi
+            echo "Exact candidate $PACKAGE_NAME@$VERSION is already published; publication will be skipped."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$(<"$ERROR_FILE")" == *"E404"* ]]; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Unable to query npm registry:\n%s\n' "$(<"$ERROR_FILE")"
+            exit "$STATUS"
+          fi
+          test -f "release-artifacts/$TARBALL"
+
+      - name: Configure first-publish npm token fallback
+        id: npm_auth
+        if: steps.registry.outputs.already_published != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$NODE_AUTH_TOKEN" ]]; then
+            npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN" --location=user
+            echo "mode=token" >> "$GITHUB_OUTPUT"
+            echo "Using the npm environment token for first-publish bootstrap."
+          else
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+            echo "No token configured; npm trusted publishing will use GitHub OIDC."
+          fi
+
+      - name: Publish to npm
+        if: steps.registry.outputs.already_published != 'true'
+        env:
+          NPM_TAG: ${{ needs.build.outputs.npm_tag }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: npm publish "./release-artifacts/$TARBALL" --access public --provenance --tag "$NPM_TAG" --registry=https://registry.npmjs.org
+
+      - name: Remove npm token fallback
+        if: always() && steps.npm_auth.outputs.mode == 'token'
+        run: npm config delete //registry.npmjs.org/:_authToken --location=user
+
+      - name: Verify published package integrity
+        env:
+          NPM_TAG: ${{ needs.build.outputs.npm_tag }}
+          PACKAGE_NAME: ${{ needs.build.outputs.package_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_INTEGRITY="$(<release-artifacts/npm-integrity.txt)"
+          for attempt in {1..12}; do
+            REGISTRY_INTEGRITY="$(npm view "$PACKAGE_NAME@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>/dev/null || true)"
+            DIST_TAG_VERSION="$(npm view "$PACKAGE_NAME" "dist-tags.$NPM_TAG" --registry=https://registry.npmjs.org 2>/dev/null || true)"
+            if [[ "$REGISTRY_INTEGRITY" == "$EXPECTED_INTEGRITY" && "$DIST_TAG_VERSION" == "$VERSION" ]]; then
+              echo "Verified $PACKAGE_NAME@$VERSION integrity and the $NPM_TAG dist-tag on npm."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "npm did not return the expected integrity and $NPM_TAG dist-tag for $PACKAGE_NAME@$VERSION."
+          exit 1
+
+      - name: Attest build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: release-artifacts/${{ needs.build.outputs.tarball }}
+
+      - name: Attest SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: release-artifacts/${{ needs.build.outputs.tarball }}
+          sbom-path: release-artifacts/${{ needs.build.outputs.sbom }}
+
+  github-release:
+    name: create GitHub release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ needs.build.outputs.version }}
+          path: release-artifacts
+
+      - name: Create or update GitHub release
+        env:
+          CHECKSUMS: ${{ needs.build.outputs.checksums }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SBOM: ${{ needs.build.outputs.sbom }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            RELEASE_JSON="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,name,tagName)"
+            node -e '
+              const release = JSON.parse(process.argv[1]);
+              const [tag, version, prerelease] = process.argv.slice(2);
+              if (release.tagName !== tag || release.name !== `urlens ${version}` ||
+                  release.isDraft || release.isPrerelease !== (prerelease === "true")) {
+                throw new Error("Existing GitHub release metadata does not match this release");
+              }
+            ' "$RELEASE_JSON" "$RELEASE_TAG" "$VERSION" "$PRERELEASE"
+            ASSETS_JSON="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets')"
+            node -e '
+              const assets = JSON.parse(process.argv[1]);
+              for (const name of process.argv.slice(2)) {
+                if (!assets.some((asset) => asset.name === name)) {
+                  throw new Error(`Existing GitHub release is missing ${name}; resolve it manually`);
+                }
+              }
+            ' "$ASSETS_JSON" "$TARBALL" "$SBOM" "$CHECKSUMS"
+            EXPECTED_TARBALL_DIGEST="sha256:$(sha256sum "release-artifacts/$TARBALL" | cut -d ' ' -f 1)"
+            RELEASE_TARBALL_DIGEST="$(node -e '
+              const assets = JSON.parse(process.argv[1]);
+              const asset = assets.find((entry) => entry.name === process.argv[2]);
+              process.stdout.write(asset?.digest ?? "");
+            ' "$ASSETS_JSON" "$TARBALL")"
+            if [[ "$RELEASE_TARBALL_DIGEST" != "$EXPECTED_TARBALL_DIGEST" ]]; then
+              echo "Existing GitHub release tarball does not match the npm candidate."
+              exit 1
+            fi
+            echo "Existing GitHub release metadata and assets are complete; no assets replaced."
+          else
+            PRERELEASE_ARGS=()
+            if [[ "$PRERELEASE" == "true" ]]; then
+              PRERELEASE_ARGS+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" \
+              "release-artifacts/$TARBALL" \
+              "release-artifacts/$SBOM" \
+              "release-artifacts/$CHECKSUMS" \
+              --verify-tag --generate-notes --title "urlens $VERSION" "${PRERELEASE_ARGS[@]}"
+          fi

@@ -1,0 +1,1114 @@
+import { decodeRange } from "./decode.js";
+import { encodeQueryComponent } from "./encode.js";
+import { CH_AMP, findKeyMatch } from "./internal.js";
+import {
+  compareDecodedValueRange,
+  hasQueryParamDecodedFallback,
+  keyIsAmbiguous,
+  queryHasEncoding,
+  queryParamDecodedFallback,
+  queryParamEqualsDecodedFallback,
+} from "./query-scan.js";
+
+const CH_PERCENT = 37;
+const CH_PLUS = 43;
+
+// LOC_Q and LOC_F are non-reentrant scratch values and must be read immediately.
+// If '#' precedes '?', the '?' belongs to the fragment.
+
+let LOC_Q = -1;
+let LOC_F = 0;
+
+// fallow-ignore-next-line complexity
+function locate(rawUrl: string): void {
+  const qPos = rawUrl.indexOf("?");
+  if (qPos === -1) {
+    const hPos = rawUrl.indexOf("#");
+    LOC_Q = -1;
+    LOC_F = hPos === -1 ? rawUrl.length : hPos;
+    return;
+  }
+  const hPos = rawUrl.indexOf("#");
+  if (hPos !== -1 && hPos < qPos) {
+    // '?' is content inside a fragment — treat as no query.
+    LOC_Q = -1;
+    LOC_F = hPos;
+    return;
+  }
+  LOC_Q = qPos;
+  LOC_F = hPos === -1 ? rawUrl.length : hPos;
+}
+
+// Computes non-reentrant KEY_ENCODED and KEY_AMBIG scratch values.
+const SAFE_KEY = new Uint8Array(128);
+for (let c = 48; c <= 57; c++) {
+  SAFE_KEY[c] = 1;
+}
+for (let c = 65; c <= 90; c++) {
+  SAFE_KEY[c] = 1;
+}
+for (let c = 97; c <= 122; c++) {
+  SAFE_KEY[c] = 1;
+}
+SAFE_KEY[42] = 1; // *
+SAFE_KEY[45] = 1; // -
+SAFE_KEY[46] = 1; // .
+SAFE_KEY[95] = 1; // _
+
+let KEY_ENCODED = "";
+let KEY_AMBIG = false;
+
+// Per-call query-encoding state: -1 unknown, 0 absent, 1 present.
+let Q_ENC_STATE = -1;
+
+// Returns the key index whose decoded name matches this field, or -1.
+function matchFieldDecodedFallback(
+  raw: string,
+  fieldStart: number,
+  keyEnd: number,
+  fieldLen: number,
+  keys: readonly string[],
+  queryStart: number,
+  queryEnd: number
+): number {
+  if (Q_ENC_STATE === 0) {
+    return -1;
+  }
+  // Decoded length ≤ encoded length: prune when no key could possibly fit.
+  let couldMatch = false;
+  const n = keys.length;
+  for (let k = 0; k < n; k++) {
+    if (fieldLen >= keys[k].length) {
+      couldMatch = true;
+      break;
+    }
+  }
+  if (!couldMatch) {
+    return -1;
+  }
+  if (Q_ENC_STATE === -1) {
+    Q_ENC_STATE = queryHasEncoding(raw, queryStart, queryEnd) ? 1 : 0;
+  }
+  if (Q_ENC_STATE === 0) {
+    return -1;
+  }
+  let fieldEnc = false;
+  for (let p = fieldStart; p < keyEnd; p++) {
+    const c = raw.charCodeAt(p);
+    if (c === CH_PERCENT || c === CH_PLUS) {
+      fieldEnc = true;
+      break;
+    }
+  }
+  if (!fieldEnc) {
+    return -1;
+  }
+  for (let k = 0; k < n; k++) {
+    if (
+      fieldLen >= keys[k].length &&
+      compareDecodedValueRange(raw, fieldStart, keyEnd, keys[k])
+    ) {
+      return k;
+    }
+  }
+  return -1;
+}
+
+// fallow-ignore-next-line complexity
+function analyzeSetterKey(key: string): void {
+  const len = key.length;
+  let allSafe = true;
+  let hasAmbig = false;
+  for (let p = 0; p < len; p++) {
+    const c = key.charCodeAt(p);
+    if (c === CH_PERCENT || c === CH_PLUS) {
+      hasAmbig = true;
+      allSafe = false;
+    } else if (c >= 128 || SAFE_KEY[c] !== 1) {
+      allSafe = false;
+    }
+  }
+  KEY_AMBIG = hasAmbig;
+  KEY_ENCODED = allSafe ? key : encodeQueryComponent(key);
+}
+
+// Rebuilds a query prefix using the setters' existing empty-field
+// normalization. Only used after a deletion finds its first match behind an
+// unusual leading/interior empty field; normal prefixes use one substring.
+function normalizeQueryPrefix(raw: string, start: number, end: number): string {
+  let out = "";
+  let i = start;
+  while (i < end) {
+    let amp = raw.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    if (out.length > 0) {
+      out += "&";
+    }
+    out += raw.substring(i, amp);
+    i = amp + 1;
+  }
+  return out;
+}
+
+// Specialized two-key reader avoids per-key metadata arrays.
+// fallow-ignore-next-line complexity
+function readTwoQueryParams(
+  rawUrl: string,
+  keys: readonly string[],
+  out: (string | null)[]
+): void {
+  out[0] = null;
+  out[1] = null;
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return;
+  }
+
+  const end = LOC_F;
+  const key0 = keys[0];
+  const key1 = keys[1];
+  const len0 = key0.length;
+  const len1 = key1.length;
+  const packed0 = len0 === 0 ? 0 : key0.charCodeAt(0) * 65536 + len0;
+  const packed1 = len1 === 0 ? 0 : key1.charCodeAt(0) * 65536 + len1;
+  const ambig0 = keyIsAmbiguous(key0);
+  const ambig1 = keyIsAmbiguous(key1);
+  let remaining = 3;
+  let i = qPos + 1;
+
+  while (i < end && remaining !== 0) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldLen = keyEnd - i;
+    const fieldPacked =
+      fieldLen === 0
+        ? eq === i
+          ? 0
+          : -2
+        : rawUrl.charCodeAt(i) * 65536 + fieldLen;
+    const match0 =
+      (remaining & 1) !== 0 &&
+      packed0 === fieldPacked &&
+      rawUrl.startsWith(key0, i) &&
+      (!ambig0 || compareDecodedValueRange(rawUrl, i, keyEnd, key0));
+    const match1 =
+      (remaining & 2) !== 0 &&
+      packed1 === fieldPacked &&
+      rawUrl.startsWith(key1, i) &&
+      (!ambig1 || compareDecodedValueRange(rawUrl, i, keyEnd, key1));
+    if (match0 || match1) {
+      const value =
+        eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+      if (match0) {
+        out[0] = value;
+        remaining &= 2;
+      }
+      if (match1) {
+        out[1] = value;
+        remaining &= 1;
+      }
+    }
+    i = amp + 1;
+  }
+
+  if (remaining === 0 || !queryHasEncoding(rawUrl, qPos + 1, end)) {
+    return;
+  }
+
+  let j = qPos + 1;
+  while (j < end && remaining !== 0) {
+    let amp = rawUrl.indexOf("&", j);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = rawUrl.indexOf("=", j);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldLen = keyEnd - j;
+    if (fieldLen === 0 && eq !== j) {
+      j = amp + 1;
+      continue;
+    }
+    const match0 =
+      (remaining & 1) !== 0 &&
+      fieldLen >= len0 &&
+      compareDecodedValueRange(rawUrl, j, keyEnd, key0);
+    const match1 =
+      (remaining & 2) !== 0 &&
+      fieldLen >= len1 &&
+      compareDecodedValueRange(rawUrl, j, keyEnd, key1);
+    if (match0 || match1) {
+      const value =
+        eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+      if (match0) {
+        out[0] = value;
+        remaining &= 2;
+      }
+      if (match1) {
+        out[1] = value;
+        remaining &= 1;
+      }
+    }
+    j = amp + 1;
+  }
+}
+
+/**
+ * Returns the decoded value of `key` from the query string of `rawUrl`, or
+ * `null` if absent. Returns `""` if the key is present without a value
+ * (e.g. `?k` or `?k=`).
+ *
+ * Keys are compared after WHATWG `application/x-www-form-urlencoded` decoding.
+ *
+ * @example
+ *   readQueryParam("https://x/?q=hello+world", "q");          // → "hello world"
+ *   readQueryParam("https://x/?weird%20key=v", "weird key");  // → "v"
+ *   readQueryParam("https://x/", "q");                        // → null
+ *   readQueryParam("https://x/?k", "k");                      // → ""
+ */
+// fallow-ignore-next-line complexity
+export function readQueryParam(rawUrl: string, key: string): string | null {
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return null;
+  }
+  const end = LOC_F;
+  const keyLen = key.length;
+  const queryStart = qPos + 1;
+
+  if (keyLen !== 0 && !keyIsAmbiguous(key)) {
+    const idx = findKeyMatch(rawUrl, queryStart, end, key);
+    if (idx !== -1) {
+      const after = idx + keyLen;
+      if (after === end || rawUrl.charCodeAt(after) === CH_AMP) {
+        return "";
+      }
+      let amp = rawUrl.indexOf("&", after + 1);
+      if (amp === -1 || amp > end) {
+        amp = end;
+      }
+      return decodeRange(rawUrl, after + 1, amp);
+    }
+    if (!queryHasEncoding(rawUrl, queryStart, end)) {
+      return null;
+    }
+    return queryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
+  }
+
+  // Ambiguous user key: each byte-equal hit must be verified with the WHATWG
+  // walker before being returned.
+  let i = queryStart;
+  while (i < end) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+
+    if (
+      keyEnd - i === keyLen &&
+      (keyLen !== 0 || eq === i) &&
+      rawUrl.startsWith(key, i) &&
+      compareDecodedValueRange(rawUrl, i, keyEnd, key)
+    ) {
+      if (eq === -1 || eq > amp) {
+        return "";
+      }
+      return decodeRange(rawUrl, eq + 1, amp);
+    }
+    i = amp + 1;
+  }
+
+  if (!queryHasEncoding(rawUrl, queryStart, end)) {
+    return null;
+  }
+  return queryParamDecodedFallback(rawUrl, queryStart, end, key, keyLen);
+}
+
+/**
+ * Batches the requested keys without repeating one full lookup per key and
+ * preserves their tuple order.
+ *
+ * The `const` generic preserves the input tuple shape so destructuring is
+ * fully typed:
+ *
+ * @example
+ *   const [q, src] = readQueryParams(
+ *     "https://x/r?q=hi&utm_source=ig",
+ *     ["q", "utm_source"] as const,
+ *   );
+ *   // q: string | null, src: string | null
+ *
+ * For destructuring by **name**, use `view(url).queryParams(keys)` — it
+ * returns an object keyed by the input keys.
+ */
+// fallow-ignore-next-line complexity
+export function readQueryParams<const K extends readonly string[]>(
+  rawUrl: string,
+  keys: K
+): { -readonly [I in keyof K]: string | null } {
+  const n = keys.length;
+  const out: (string | null)[] = new Array(n);
+  if (n === 0) {
+    return out as { -readonly [I in keyof K]: string | null };
+  }
+  if (n === 1) {
+    out[0] = readQueryParam(rawUrl, keys[0]);
+    return out as { -readonly [I in keyof K]: string | null };
+  }
+  if (n === 2) {
+    readTwoQueryParams(rawUrl, keys, out);
+    return out as { -readonly [I in keyof K]: string | null };
+  }
+
+  // Pack each key's first character and length; use a mask for ambiguity flags.
+  const keyPacked: number[] = new Array(n);
+  const useAmbigMask = n <= 32;
+  let keyAmbigMask = 0;
+  for (let k = 0; k < n; k++) {
+    out[k] = null;
+    const kk = keys[k];
+    keyPacked[k] = kk.length === 0 ? 0 : kk.charCodeAt(0) * 65536 + kk.length;
+    if (useAmbigMask && keyIsAmbiguous(kk)) {
+      keyAmbigMask |= 1 << k;
+    }
+  }
+
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return out as { -readonly [I in keyof K]: string | null };
+  }
+  const end = LOC_F;
+
+  // Pass 1: byte-strict.
+  let remaining = n;
+  let i = qPos + 1;
+  while (i < end && remaining > 0) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldPacked =
+      keyEnd === i
+        ? eq === i
+          ? 0
+          : -2
+        : rawUrl.charCodeAt(i) * 65536 + (keyEnd - i);
+
+    for (let k = 0; k < n; k++) {
+      if (keyPacked[k] !== fieldPacked) {
+        // Also skips already-found slots: those are marked with the -1
+        // sentinel below, which can't match a non-negative fieldPacked.
+        continue;
+      }
+      if (rawUrl.startsWith(keys[k], i)) {
+        if (
+          (useAmbigMask
+            ? (keyAmbigMask & (1 << k)) === 0
+            : !keyIsAmbiguous(keys[k])) ||
+          compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
+        ) {
+          out[k] =
+            eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          keyPacked[k] = -1;
+          remaining--;
+        }
+      }
+    }
+
+    i = amp + 1;
+  }
+
+  // Pass 2: WHATWG-decoded fallback for unmatched slots, only if the URL has
+  // encoding (otherwise byte-strict was conclusive).
+  if (remaining > 0 && queryHasEncoding(rawUrl, qPos + 1, end)) {
+    let j = qPos + 1;
+    while (j < end && remaining > 0) {
+      let amp = rawUrl.indexOf("&", j);
+      if (amp === -1 || amp > end) {
+        amp = end;
+      }
+      const eq = rawUrl.indexOf("=", j);
+      const keyEnd = eq === -1 || eq > amp ? amp : eq;
+      const fieldLen = keyEnd - j;
+      if (fieldLen === 0 && eq !== j) {
+        j = amp + 1;
+        continue;
+      }
+      for (let k = 0; k < n; k++) {
+        if (keyPacked[k] === -1) {
+          continue;
+        }
+        if (fieldLen < keys[k].length) {
+          continue;
+        }
+        if (compareDecodedValueRange(rawUrl, j, keyEnd, keys[k])) {
+          out[k] =
+            eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          keyPacked[k] = -1;
+          remaining--;
+        }
+      }
+      j = amp + 1;
+    }
+  }
+
+  return out as { -readonly [I in keyof K]: string | null };
+}
+
+/**
+ * Returns a new URL string with `key` set to `value`, or with `key` removed
+ * when `value` is `null`. Matches `URLSearchParams.set` semantics for
+ * duplicates: the first occurrence is replaced, any subsequent occurrences
+ * are removed.
+ *
+ * Both the key and value are serialized per WHATWG
+ * `application/x-www-form-urlencoded`: spaces become `+`, every byte outside
+ * `* - . _ 0-9 A-Z a-z` is percent-encoded. Key matching is also WHATWG-
+ * decoded — so `setQueryParam("?weird%20key=old", "weird key", "new")`
+ * replaces the existing encoded key in place.
+ *
+ * @example
+ *   setQueryParam("https://x/?a=1", "q", "hello world");
+ *   // → "https://x/?a=1&q=hello+world"
+ *
+ *   setQueryParam("https://x/?q=old", "q", null);
+ *   // → "https://x/" (delete)
+ *
+ *   setQueryParam("https://x/?weird%20key=old", "weird key", "new");
+ *   // → "https://x/?weird+key=new"
+ */
+// fallow-ignore-next-line complexity
+export function setQueryParam(
+  rawUrl: string,
+  key: string,
+  value: string | null
+): string {
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  const fragmentStart = LOC_F;
+
+  if (qPos === -1) {
+    if (value === null) {
+      return rawUrl;
+    }
+    analyzeSetterKey(key);
+    const encodedKey = KEY_ENCODED;
+    const pair = `${encodedKey}=${encodeQueryComponent(value)}`;
+    return `${rawUrl.substring(0, fragmentStart)}?${pair}${rawUrl.substring(fragmentStart)}`;
+  }
+
+  const queryStart = qPos + 1;
+  const queryEnd = fragmentStart;
+  const keyLen = key.length;
+  let encodedKey = "";
+  let userAmbig: boolean;
+  if (value === null) {
+    // Deletion never emits the key, so encoding it is pure waste and may
+    // allocate for spaces or Unicode.
+    userAmbig = keyIsAmbiguous(key);
+  } else {
+    analyzeSetterKey(key);
+    encodedKey = KEY_ENCODED;
+    userAmbig = KEY_AMBIG;
+  }
+  const encoded = value === null ? null : encodeQueryComponent(value);
+  // -1 unknown, 0 no encoding, 1 encoding present.
+  let queryEncodingState = -1;
+
+  let newQuery = "";
+  let replaced = false;
+  let matched = false;
+  let i = queryStart;
+
+  while (i < queryEnd) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > queryEnd) {
+      amp = queryEnd;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldLen = keyEnd - i;
+    let isMatch =
+      fieldLen === keyLen &&
+      (keyLen !== 0 || eq === i) &&
+      rawUrl.startsWith(key, i);
+
+    // Verify ambiguous byte-equal hits. byte-equal can disagree with WHATWG
+    // when both sides have identical encoded bytes that decode to something
+    // else (e.g. user key "a%20b" vs URL key "a%20b" — WHATWG no-match).
+    if (isMatch && userAmbig) {
+      if (!compareDecodedValueRange(rawUrl, i, keyEnd, key)) {
+        isMatch = false;
+      }
+    }
+
+    if (!isMatch && fieldLen >= keyLen) {
+      if (queryEncodingState === -1) {
+        queryEncodingState = queryHasEncoding(rawUrl, queryStart, queryEnd)
+          ? 1
+          : 0;
+      }
+      if (queryEncodingState === 1) {
+        let fieldEnc = false;
+        for (let p = i; p < keyEnd; p++) {
+          const c = rawUrl.charCodeAt(p);
+          if (c === CH_PERCENT || c === CH_PLUS) {
+            fieldEnc = true;
+            break;
+          }
+        }
+        if (fieldEnc && compareDecodedValueRange(rawUrl, i, keyEnd, key)) {
+          isMatch = true;
+        }
+      }
+    }
+
+    if (isMatch) {
+      if (!matched && encoded === null && i > queryStart) {
+        newQuery =
+          rawUrl.charCodeAt(queryStart) !== CH_AMP
+            ? rawUrl.substring(queryStart, i - 1)
+            : normalizeQueryPrefix(rawUrl, queryStart, i - 1);
+      }
+      matched = true;
+      if (!replaced && encoded !== null) {
+        if (newQuery.length > 0) {
+          newQuery += "&";
+        }
+        newQuery += `${encodedKey}=${encoded}`;
+        replaced = true;
+      }
+    } else if (encoded !== null || matched) {
+      if (newQuery.length > 0) {
+        newQuery += "&";
+      }
+      newQuery += rawUrl.substring(i, amp);
+    }
+
+    i = amp + 1;
+  }
+
+  if (!replaced && encoded !== null) {
+    if (newQuery.length > 0) {
+      newQuery += "&";
+    }
+    newQuery += `${encodedKey}=${encoded}`;
+  }
+
+  if (!matched && encoded === null) {
+    return rawUrl;
+  }
+
+  const prefix = rawUrl.substring(0, qPos);
+  const suffix = rawUrl.substring(queryEnd);
+  if (newQuery.length === 0) {
+    return prefix + suffix;
+  }
+  return `${prefix}?${newQuery}${suffix}`;
+}
+
+/**
+ * Bulk version of {@link setQueryParam}. Single-pass over the existing query:
+ * each existing param is either replaced (if its key is in `params`), skipped
+ * (if `params[key]` is `null`), or kept verbatim. Any keys in `params` not
+ * present in the URL are appended at the end in iteration order.
+ *
+ * Keys are matched and serialized per WHATWG `application/x-www-form-urlencoded`.
+ *
+ * @example
+ *   setQueryParams("https://x/?a=1&b=2", { a: "new", b: null, c: "3" });
+ *   // → "https://x/?a=new&c=3"
+ */
+// fallow-ignore-next-line complexity
+export function setQueryParams(
+  rawUrl: string,
+  params: Record<string, string | null>
+): string {
+  const keys = Object.keys(params);
+  const n = keys.length;
+  if (n === 0) {
+    return rawUrl;
+  }
+  if (n === 1) {
+    const key = keys[0];
+    return setQueryParam(rawUrl, key, params[key]);
+  }
+
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  const fragmentStart = LOC_F;
+
+  if (qPos === -1) {
+    let body = "";
+    for (let k = 0; k < n; k++) {
+      const value = params[keys[k]];
+      if (value === null) {
+        continue;
+      }
+      analyzeSetterKey(keys[k]);
+      if (body.length > 0) {
+        body += "&";
+      }
+      body += `${KEY_ENCODED}=${encodeQueryComponent(value)}`;
+    }
+    if (body.length === 0) {
+      return rawUrl;
+    }
+    return `${rawUrl.substring(0, fragmentStart)}?${body}${rawUrl.substring(fragmentStart)}`;
+  }
+
+  // Precompute encoded values and packed key metadata for field matching.
+  const encoded: (string | null)[] = new Array(n);
+  const encodedKeys: string[] = new Array(n);
+  const keyPacked: number[] = new Array(n);
+  const useMasks = n <= 32;
+  const seen = useMasks ? null : new Array<boolean>(n).fill(false);
+  let keyAmbigMask = 0;
+  let seenMask = 0;
+  for (let k = 0; k < n; k++) {
+    const v = params[keys[k]];
+    encoded[k] = v === null ? null : encodeQueryComponent(v);
+    analyzeSetterKey(keys[k]);
+    encodedKeys[k] = KEY_ENCODED;
+    if (useMasks && KEY_AMBIG) {
+      keyAmbigMask |= 1 << k;
+    }
+    keyPacked[k] =
+      keys[k].length === 0 ? 0 : keys[k].charCodeAt(0) * 65536 + keys[k].length;
+  }
+
+  const queryStart = qPos + 1;
+  const queryEnd = fragmentStart;
+  let newQuery = "";
+  let i = queryStart;
+  Q_ENC_STATE = -1;
+
+  while (i < queryEnd) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > queryEnd) {
+      amp = queryEnd;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldLen = keyEnd - i;
+    const fieldPacked =
+      fieldLen === 0
+        ? eq === i
+          ? 0
+          : -2
+        : rawUrl.charCodeAt(i) * 65536 + fieldLen;
+
+    let matchedSlot = -1;
+    for (let k = 0; k < n; k++) {
+      const keyAmbig = useMasks
+        ? (keyAmbigMask & (1 << k)) !== 0
+        : keyIsAmbiguous(keys[k]);
+      if (
+        keyPacked[k] === fieldPacked &&
+        rawUrl.startsWith(keys[k], i) &&
+        (!keyAmbig || compareDecodedValueRange(rawUrl, i, keyEnd, keys[k]))
+      ) {
+        matchedSlot = k;
+        k = n;
+      }
+    }
+    if (matchedSlot === -1) {
+      matchedSlot = matchFieldDecodedFallback(
+        rawUrl,
+        i,
+        keyEnd,
+        fieldLen,
+        keys,
+        queryStart,
+        queryEnd
+      );
+    }
+
+    if (matchedSlot !== -1) {
+      const enc = encoded[matchedSlot];
+      const wasSeen = useMasks
+        ? (seenMask & (1 << matchedSlot)) !== 0
+        : seen?.[matchedSlot] === true;
+      if (!wasSeen && enc !== null) {
+        if (newQuery.length > 0) {
+          newQuery += "&";
+        }
+        newQuery += `${encodedKeys[matchedSlot]}=${enc}`;
+      }
+      if (useMasks) {
+        seenMask |= 1 << matchedSlot;
+      } else if (seen !== null) {
+        seen[matchedSlot] = true;
+      }
+    } else {
+      if (newQuery.length > 0) {
+        newQuery += "&";
+      }
+      newQuery += rawUrl.substring(i, amp);
+    }
+
+    i = amp + 1;
+  }
+
+  for (let k = 0; k < n; k++) {
+    const wasSeen = useMasks ? (seenMask & (1 << k)) !== 0 : seen?.[k] === true;
+    if (wasSeen || encoded[k] === null) {
+      continue;
+    }
+    if (newQuery.length > 0) {
+      newQuery += "&";
+    }
+    newQuery += `${encodedKeys[k]}=${encoded[k]}`;
+  }
+
+  const prefix = rawUrl.substring(0, qPos);
+  const suffix = rawUrl.substring(queryEnd);
+  if (newQuery.length === 0) {
+    return prefix + suffix;
+  }
+  return `${prefix}?${newQuery}${suffix}`;
+}
+
+/**
+ * Removes `key` from the query string. Equivalent to
+ * `setQueryParam(rawUrl, key, null)`.
+ *
+ * If `key` has duplicates, all occurrences are removed (matching
+ * `URLSearchParams.delete`). Key matching is WHATWG-decoded.
+ *
+ * @example
+ *   removeQueryParam("https://x/?a=1&utm=ig", "utm");
+ *   // → "https://x/?a=1"
+ */
+export function removeQueryParam(rawUrl: string, key: string): string {
+  return setQueryParam(rawUrl, key, null);
+}
+
+/**
+ * Removes all requested keys in one query scan. Key matching is WHATWG-decoded.
+ *
+ * @example
+ *   removeQueryParams(
+ *     "https://x/?q=hi&utm_source=ig&utm_campaign=spring",
+ *     ["utm_source", "utm_campaign"],
+ *   );
+ *   // → "https://x/?q=hi"
+ */
+// fallow-ignore-next-line complexity
+export function removeQueryParams(
+  rawUrl: string,
+  keys: readonly string[]
+): string {
+  const n = keys.length;
+  if (n === 0) {
+    return rawUrl;
+  }
+  if (n === 1) {
+    return removeQueryParam(rawUrl, keys[0]);
+  }
+
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return rawUrl;
+  }
+  const fragmentStart = LOC_F;
+  const queryEnd = fragmentStart;
+
+  const keyPacked: number[] = new Array(n);
+  const useAmbigMask = n <= 32;
+  let keyAmbigMask = 0;
+  for (let k = 0; k < n; k++) {
+    keyPacked[k] =
+      keys[k].length === 0 ? 0 : keys[k].charCodeAt(0) * 65536 + keys[k].length;
+    if (useAmbigMask && keyIsAmbiguous(keys[k])) {
+      keyAmbigMask |= 1 << k;
+    }
+  }
+
+  const queryStart = qPos + 1;
+  let newQuery = "";
+  let removed = false;
+  let i = queryStart;
+  Q_ENC_STATE = -1;
+
+  while (i < queryEnd) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > queryEnd) {
+      amp = queryEnd;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    const fieldLen = keyEnd - i;
+    const fieldPacked =
+      fieldLen === 0
+        ? eq === i
+          ? 0
+          : -2
+        : rawUrl.charCodeAt(i) * 65536 + fieldLen;
+
+    let isMatch = false;
+    for (let k = 0; k < n; k++) {
+      const keyAmbig = useAmbigMask
+        ? (keyAmbigMask & (1 << k)) !== 0
+        : keyIsAmbiguous(keys[k]);
+      if (
+        keyPacked[k] === fieldPacked &&
+        rawUrl.startsWith(keys[k], i) &&
+        (!keyAmbig || compareDecodedValueRange(rawUrl, i, keyEnd, keys[k]))
+      ) {
+        isMatch = true;
+        k = n;
+      }
+    }
+    if (!isMatch) {
+      isMatch =
+        matchFieldDecodedFallback(
+          rawUrl,
+          i,
+          keyEnd,
+          fieldLen,
+          keys,
+          queryStart,
+          queryEnd
+        ) !== -1;
+    }
+
+    if (!isMatch) {
+      if (removed) {
+        if (newQuery.length > 0) {
+          newQuery += "&";
+        }
+        newQuery += rawUrl.substring(i, amp);
+      }
+    } else {
+      if (!removed && i > queryStart) {
+        newQuery =
+          rawUrl.charCodeAt(queryStart) !== CH_AMP
+            ? rawUrl.substring(queryStart, i - 1)
+            : normalizeQueryPrefix(rawUrl, queryStart, i - 1);
+      }
+      removed = true;
+    }
+    i = amp + 1;
+  }
+
+  if (!removed) {
+    return rawUrl;
+  }
+
+  const prefix = rawUrl.substring(0, qPos);
+  const suffix = rawUrl.substring(queryEnd);
+  if (newQuery.length === 0) {
+    return prefix + suffix;
+  }
+  return `${prefix}?${newQuery}${suffix}`;
+}
+
+/**
+ * Returns `true` if `key` is present without materializing its value
+ * (including bare `?key` with no value). Key matching is WHATWG-decoded.
+ *
+ * @example
+ *   hasQueryParam("https://x/?a=1", "a");                  // → true
+ *   hasQueryParam("https://x/?weird%20key=v", "weird key"); // → true
+ *   hasQueryParam("https://x/", "a");                      // → false
+ */
+// fallow-ignore-next-line complexity
+export function hasQueryParam(rawUrl: string, key: string): boolean {
+  const qPos = rawUrl.indexOf("?");
+  if (qPos === -1) {
+    return false;
+  }
+  const hPos = rawUrl.indexOf("#");
+  if (hPos !== -1 && hPos < qPos) {
+    return false;
+  }
+  const fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+  const queryStart = qPos + 1;
+  const keyLen = key.length;
+
+  if (keyLen !== 0 && !keyIsAmbiguous(key)) {
+    if (findKeyMatch(rawUrl, queryStart, fragmentStart, key) !== -1) {
+      return true;
+    }
+    if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) {
+      return false;
+    }
+    return hasQueryParamDecodedFallback(
+      rawUrl,
+      queryStart,
+      fragmentStart,
+      key,
+      keyLen
+    );
+  }
+
+  // Ambiguous user key: each byte-equal hit must round-trip through the
+  // WHATWG walker before being accepted.
+  let i = queryStart;
+  while (i < fragmentStart) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > fragmentStart) {
+      amp = fragmentStart;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (
+      keyEnd - i === keyLen &&
+      (keyLen !== 0 || eq === i) &&
+      rawUrl.startsWith(key, i) &&
+      compareDecodedValueRange(rawUrl, i, keyEnd, key)
+    ) {
+      return true;
+    }
+    i = amp + 1;
+  }
+
+  if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) {
+    return false;
+  }
+  return hasQueryParamDecodedFallback(
+    rawUrl,
+    queryStart,
+    fragmentStart,
+    key,
+    keyLen
+  );
+}
+
+/**
+ * Returns `true` if the decoded value of `key`
+ * equals `expected`. Key matching is WHATWG-decoded.
+ *
+ * Compares in place without materializing the decoded value. Malformed UTF-8
+ * is matched as U+FFFD.
+ *
+ * @example
+ *   queryParamEquals("https://x/?q=hello+world", "q", "hello world"); // → true
+ *   queryParamEquals("https://x/?q=caf%C3%A9", "q", "café");          // → true
+ */
+// fallow-ignore-next-line complexity
+export function queryParamEquals(
+  rawUrl: string,
+  key: string,
+  expected: string
+): boolean {
+  const qPos = rawUrl.indexOf("?");
+  if (qPos === -1) {
+    return false;
+  }
+  const hPos = rawUrl.indexOf("#");
+  if (hPos !== -1 && hPos < qPos) {
+    return false;
+  }
+  const fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+  const queryStart = qPos + 1;
+  const keyLen = key.length;
+
+  if (keyLen !== 0 && !keyIsAmbiguous(key)) {
+    const idx = findKeyMatch(rawUrl, queryStart, fragmentStart, key);
+    if (idx !== -1) {
+      const after = idx + keyLen;
+      if (after === fragmentStart || rawUrl.charCodeAt(after) === CH_AMP) {
+        return expected.length === 0; // bare key, no '=' → empty value
+      }
+      let amp = rawUrl.indexOf("&", after + 1);
+      if (amp === -1 || amp > fragmentStart) {
+        amp = fragmentStart;
+      }
+      return compareDecodedValueRange(rawUrl, after + 1, amp, expected);
+    }
+    if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) {
+      return false;
+    }
+    return queryParamEqualsDecodedFallback(
+      rawUrl,
+      queryStart,
+      fragmentStart,
+      key,
+      keyLen,
+      expected
+    );
+  }
+
+  // Ambiguous user key: each byte-equal hit verified via the WHATWG walker.
+  let i = queryStart;
+  while (i < fragmentStart) {
+    let amp = rawUrl.indexOf("&", i);
+    if (amp === -1 || amp > fragmentStart) {
+      amp = fragmentStart;
+    }
+    const eq = rawUrl.indexOf("=", i);
+    const keyEnd = eq === -1 || eq > amp ? amp : eq;
+    if (
+      keyEnd - i === keyLen &&
+      (keyLen !== 0 || eq === i) &&
+      rawUrl.startsWith(key, i) &&
+      compareDecodedValueRange(rawUrl, i, keyEnd, key)
+    ) {
+      const valStart = eq === -1 || eq > amp ? amp : eq + 1;
+      return compareDecodedValueRange(rawUrl, valStart, amp, expected);
+    }
+    i = amp + 1;
+  }
+
+  if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) {
+    return false;
+  }
+  return queryParamEqualsDecodedFallback(
+    rawUrl,
+    queryStart,
+    fragmentStart,
+    key,
+    keyLen,
+    expected
+  );
+}
+
+/**
+ * Returns the raw query string without the leading `?`, or `""` if absent.
+ *
+ * Does NOT decode percent-escapes. Callers that want decoded values should
+ * use {@link readQueryParam} or {@link readQueryParams}.
+ *
+ * @example
+ *   readQuery("https://x/p?a=1&b=2#frag"); // → "a=1&b=2"
+ *   readQuery("https://x/p");              // → ""
+ */
+export function readQuery(rawUrl: string): string {
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return "";
+  }
+  return rawUrl.substring(qPos + 1, LOC_F);
+}
+
+/**
+ * Returns `rawUrl` with the query string removed. Preserves the fragment.
+ * Returns the input unchanged when there is no query.
+ *
+ * @example
+ *   stripQuery("https://x/p?q=1#frag"); // → "https://x/p#frag"
+ */
+export function stripQuery(rawUrl: string): string {
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    return rawUrl;
+  }
+  return rawUrl.substring(0, qPos) + rawUrl.substring(LOC_F);
+}

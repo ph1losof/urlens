@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint, format, and typecheck
+        run: bun run check
+
+      - name: Test with coverage
+        run: bun run test:coverage
+
+      - name: Build and inspect npm package
+        run: bun run pack:check
+
+      - name: Test installed npm package
+        run: bun run test:package
+
+      - name: Pack compatibility artifact
+        run: |
+          mkdir package-artifact
+          npm pack --json --ignore-scripts --pack-destination package-artifact
+
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-artifact
+          path: package-artifact
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 7
+
+  compatibility:
+    name: node ${{ matrix.node }}
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-artifact
+          path: package-artifact
+
+      - name: Install package
+        run: |
+          mkdir fixture
+          npm install --prefix fixture --ignore-scripts --no-audit --no-fund ./package-artifact/*.tgz
+
+      - name: Smoke-test public API
+        working-directory: fixture
+        run: >-
+          node -e "import('urlens').then(m => {
+            const ok = m.readQueryParam('https://x.test/?q=hello+world', 'q') === 'hello world'
+              && m.readPathname('https://x.test/api/v1') === '/api/v1'
+              && m.readOrigin('https://x.test:8080/') === 'https://x.test:8080';
+            if (!ok) throw new Error('smoke test failed');
+          })"
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate

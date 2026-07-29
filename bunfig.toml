@@ -1,0 +1,9 @@
+[install]
+peer = false
+
+[install.lockfile]
+save = true
+
+[test]
+coverage = true
+coverageReporter = ["text", "lcov"]
