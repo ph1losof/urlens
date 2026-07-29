@@ -1,10 +1,19 @@
 # urlens
 
-Fast, allocation-conscious URL reads, predicates, and immutable updates for hot
-paths that already hold URL strings.
+Read and update query parameters, paths, origins, ports, and fragments directly
+in URL strings.
 
-`urlens` skips full URL parsing and scans only the component needed by each
-operation. On the current cross-engine benchmark it reads a plain query parameter
+`urlens` is a small ESM library for code that already has a URL string or HTTP
+request target and needs a focused operation. It avoids constructing `URL` and
+`URLSearchParams` objects, scans only the relevant part of the string, and never
+mutates the input.
+
+Use the platform `URL` class first when input is untrusted or still needs parsing,
+validation, relative URL resolution, or normalization. Use `urlens` for repeated
+work on the resulting string, or for request paths such as
+`/search?q=hello+world`.
+
+On the current cross-engine benchmark, `urlens` reads a plain query parameter
 **16.9-24.7x faster**, checks parameter presence **33.4-41.9x faster**, and reads
 pathnames **9.0-40.2x faster** than the equivalent `URL` or `URLSearchParams`
 work. It has no runtime dependencies, and a tree-shaken `readPathname` import is
@@ -135,7 +144,7 @@ baseline/candidate profiling in one browser process.
 
 ## Input Contract
 
-The supported inputs are already-normalized strings in either of these forms:
+`urlens` accepts strings in either of these forms:
 
 ```text
 scheme://[userinfo@]host[:port][/path][?query][#fragment]
