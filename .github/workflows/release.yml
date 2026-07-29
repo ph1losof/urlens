@@ -335,6 +335,7 @@ jobs:
       - name: Create or update GitHub release
         env:
           CHECKSUMS: ${{ needs.build.outputs.checksums }}
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
