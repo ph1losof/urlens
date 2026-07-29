@@ -24,6 +24,8 @@ One-time setup:
 - Enable private vulnerability reporting, then make the repository public.
 - Protect `main` and `v*` tags.
 - Create an `npm` environment with reviewer approval and restrict it to `main`.
+- Configure npm trusted publishing for `ph1losof/urlens`, workflow `release.yml`, environment `npm`,
+  with `npm publish` permission.
 
 1. Update `package.json`, replace the changelog's `Unreleased` marker with the release date, update
    the supported line in `SECURITY.md`, and update the bug report version placeholder. Run
@@ -36,11 +38,9 @@ The workflow validates the tag and package metadata, runs CI, publishes the test
 verifies npm integrity, and creates the GitHub release with provenance, an SBOM, checksums, and
 attestations. Stable versions use `latest`; prereleases use `next`.
 
-For the first publish, add a short-lived granular token with read/write access to all packages and
-CI 2FA bypass as `NPM_TOKEN` on the `npm` environment. Afterward, configure npm trusted publishing
-for `ph1losof/urlens`, workflow `release.yml`, environment `npm`; remove the secret, revoke the
-token, and require 2FA while disallowing traditional publish tokens. The workflow pins npm 11.5.1
-on Node.js 24.
+Publishing uses npm trusted publishing through GitHub OIDC. Do not store an npm publish token in
+GitHub. Require 2FA and disallow traditional publish tokens in the npm package settings. The
+workflow pins npm 11.5.1 on Node.js 24.
 
 Before tagging, enable the dependency graph, Dependabot alerts and updates, private vulnerability
 reporting, approved Actions with full-SHA pinning, and run the cross-engine benchmark.

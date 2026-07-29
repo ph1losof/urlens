@@ -257,33 +257,12 @@ jobs:
           fi
           test -f "release-artifacts/$TARBALL"
 
-      - name: Configure first-publish npm token fallback
-        id: npm_auth
-        if: steps.registry.outputs.already_published != 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "$NODE_AUTH_TOKEN" ]]; then
-            npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN" --location=user
-            echo "mode=token" >> "$GITHUB_OUTPUT"
-            echo "Using the npm environment token for first-publish bootstrap."
-          else
-            echo "mode=oidc" >> "$GITHUB_OUTPUT"
-            echo "No token configured; npm trusted publishing will use GitHub OIDC."
-          fi
-
       - name: Publish to npm
         if: steps.registry.outputs.already_published != 'true'
         env:
           NPM_TAG: ${{ needs.build.outputs.npm_tag }}
           TARBALL: ${{ needs.build.outputs.tarball }}
         run: npm publish "./release-artifacts/$TARBALL" --access public --provenance --tag "$NPM_TAG" --registry=https://registry.npmjs.org
-
-      - name: Remove npm token fallback
-        if: always() && steps.npm_auth.outputs.mode == 'token'
-        run: npm config delete //registry.npmjs.org/:_authToken --location=user
 
       - name: Verify published package integrity
         env:
