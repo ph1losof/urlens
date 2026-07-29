@@ -1,7 +1,7 @@
 {
   "name": "urlens",
   "version": "0.1.0",
-  "description": "Allocation-conscious URL reads, rewrites, and predicates for already-normalized URL strings.",
+  "description": "Fast utilities for reading and updating query parameters, paths, and other parts of URL strings.",
   "keywords": [
     "url",
     "query-string",
