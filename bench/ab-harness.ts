@@ -877,6 +877,276 @@ for (const name of Object.keys(baselineBoundaries)) {
   add(`boundary.${name}`, baselineBoundaries[name], candidateBoundaries[name]);
 }
 
+// Reader-specific workloads: delimiters embedded in values, sparse batch hits,
+// and fragments whose initial ampersand does not bound every native search.
+function readerCases(api: Api): Record<string, BenchFn> {
+  const result: Record<string, BenchFn> = {};
+  const escaped = new Array<unknown>(4096);
+  for (const count of [128, 1024, 8192]) {
+    for (const hit of [true, false]) {
+      const urls = FULL_URLS.map(
+        (_, i) =>
+          `/?q=${"?targeted".repeat(count)}${i}&${hit ? "target" : "other"}=right#end`
+      );
+      result[`collision.${count}.${hit ? "hit" : "miss"}`] = () => {
+        sink =
+          (sink + (api.readQueryParam(next(urls), "target")?.length ?? 0)) | 0;
+      };
+    }
+  }
+  for (const count of [50, 500]) {
+    const fields = Array.from(
+      { length: count },
+      (_, i) => `utm_${i}=value`
+    ).join("&");
+    const urls = FULL_URLS.map((_, i) => `/?${fields}&last=${i}#end`);
+    for (const keyCount of [3, 8, 32, 64]) {
+      const keys = Array.from(
+        { length: keyCount },
+        (_, i) => `utm_${Math.floor((i * count) / keyCount)}`
+      );
+      result[`fields${count}.keys${keyCount}`] = () => {
+        const value = api.readQueryParams(next(urls), keys);
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+    }
+  }
+  for (const count of [3, 8, 32]) {
+    for (const [name, field, key] of [
+      ["plain", "message", "message"],
+      ["decoded", "encoded%20key", "encoded key"],
+    ] as const) {
+      const keys = new Array<string>(count).fill(key);
+      const urls = FULL_URLS.map(
+        (_, i) => `/?${field}=${"caf%C3%A9+".repeat(128)}${i}&other=1#end`
+      );
+      result[`duplicates.${name}.${count}`] = () => {
+        const value = api.readQueryParams(next(urls), keys);
+        escaped[position & 4095] = value;
+        sink = (sink + (value[0]?.length ?? 0)) | 0;
+      };
+    }
+  }
+  for (const count of [3, 8, 32, 64]) {
+    const keys = Array.from({ length: count }, (_, i) => `utm_${i}`);
+    result[`noquery.keys${count}`] = () => {
+      const value = api.readQueryParams(next(NO_QUERY_URLS), keys);
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  for (const marker of ["&", "&%+missing="]) {
+    const urls = FULL_URLS.map(
+      (_, i) => `/?first=one&last=two#${marker}${"z".repeat(8192)}${i}`
+    );
+    result[`fragment.${marker.length === 1 ? "amp" : "markers"}.miss`] = () => {
+      sink =
+        (sink + (api.readQueryParam(next(urls), "absent")?.length ?? 0)) | 0;
+    };
+  }
+  return result;
+}
+
+const [baselineReaders, candidateReaders] = pairCases(readerCases);
+for (const name of Object.keys(baselineReaders)) {
+  add(`readers.${name}`, baselineReaders[name], candidateReaders[name]);
+}
+
+// Query mutators retain fragments while bounding their delimiter searches.
+function mutatorCases(api: Api): Record<string, BenchFn> {
+  const result: Record<string, BenchFn> = {};
+  const escaped = new Array<unknown>(4096);
+  for (const [name, size] of [
+    ["short", 32],
+    ["8k", 8192],
+    ["128k", 131072],
+    ["markers8k", 8192],
+  ] as const) {
+    const urls = FULL_URLS.map(
+      (_, i) =>
+        `https://x.test/api?first=one&last=two#${name === "markers8k" ? "&%+missing=" : ""}${"z".repeat(size)}${i}`
+    );
+    const operations: Record<string, (url: string) => string> = {
+      set: (url) => api.setQueryParam(url, "last", "updated"),
+      same: (url) => api.setQueryParam(url, "last", "two"),
+      append: (url) => api.setQueryParam(url, "missing", "new"),
+      delete: (url) => api.setQueryParam(url, "last", null),
+      miss: (url) => api.setQueryParam(url, "missing", null),
+      batchSet: (url) =>
+        api.setQueryParams(url, { first: "updated", last: null, added: "new" }),
+      batchDelete: (url) => api.removeQueryParams(url, ["first", "last"]),
+      batchMiss: (url) => api.removeQueryParams(url, ["missing", "absent"]),
+    };
+    for (const [operation, run] of Object.entries(operations)) {
+      result[`${name}.${operation}`] = () => {
+        const value = run(next(urls));
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+    }
+  }
+  return result;
+}
+
+const [baselineMutators, candidateMutators] = pairCases(mutatorCases);
+for (const name of Object.keys(baselineMutators)) {
+  add(`mutator.${name}`, baselineMutators[name], candidateMutators[name]);
+}
+// Component rewrite boundaries and long scheme-less inputs.
+function componentRewriteCases(api: Api): Record<string, BenchFn> {
+  const result: Record<string, BenchFn> = {};
+  const escaped = new Array<unknown>(4096);
+  for (const size of [8192, 131072]) {
+    for (const [shape, prefix] of [
+      ["absolute", "https://x.test/api"],
+      ["relative", "/api"],
+      ["noPath", "https://x.test"],
+    ] as const) {
+      const urls = FULL_URLS.map(
+        (_, i) => `${prefix}?q=${"x".repeat(size)}${i}`
+      );
+      for (const [action, path] of [
+        ["change", "/new"],
+        ["same", "/api"],
+      ] as const) {
+        result[`setPath.${size}.${shape}.${action}`] = () => {
+          const value = api.setPathname(next(urls), path);
+          escaped[position & 4095] = value;
+          sink = (sink + value.length) | 0;
+        };
+      }
+    }
+    for (const [shape, suffix] of [
+      ["bare", ""],
+      ["path", "/tail?q=1"],
+      ["colonPath", "/tail?q=http://x"],
+    ] as const) {
+      const urls = FULL_URLS.map((_, i) => `${"a".repeat(size)}${i}${suffix}`);
+      result[`scheme.${size}.${shape}`] = () => {
+        sink = (sink + api.readOrigin(next(urls)).length) | 0;
+      };
+    }
+  }
+  for (const [shape, urls] of Object.entries({
+    longPath: FULL_URLS.map(
+      (_, i) => `https://x.test/${"path/".repeat(1600)}${i}?q=1`
+    ),
+    fragment: FULL_URLS.map(
+      (_, i) => `https://x.test/api#${"x".repeat(8192)}${i}?q=1`
+    ),
+    short: FULL_URLS,
+  })) {
+    result[`setPath.${shape}`] = () => {
+      const value = api.setPathname(next(urls), "/new");
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  for (const [shape, token] of Object.entries({
+    ascii: "%41%20",
+    utf8: "%C3%A9",
+    invalid: "%FF%41",
+    latin1: "caf%E9+cr%E8me",
+    truncated: "%E2%82+",
+    continuation: "%80%41",
+    malformed: "%ZZ%41",
+  })) {
+    for (const size of [0, 64, 8192]) {
+      const values = FULL_URLS.map(
+        (_, i) => `prefix${token}+${"x".repeat(size)}${i}`
+      );
+      result[`decode.${shape}.${size}`] = () => {
+        const value = api.decodeQueryComponent(next(values));
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+    }
+  }
+  return result;
+}
+
+const [baselineComponentRewrites, candidateComponentRewrites] = pairCases(
+  componentRewriteCases
+);
+for (const name of Object.keys(baselineComponentRewrites)) {
+  add(
+    `components.${name}`,
+    baselineComponentRewrites[name],
+    candidateComponentRewrites[name]
+  );
+}
+// Retained-view and constructor workloads for the view-specific pass.
+function viewAreaCases(api: Api): Record<string, BenchFn> {
+  const result: Record<string, BenchFn> = {};
+  const escaped = new Array<unknown>(4096);
+  for (const [shape, urls] of Object.entries({
+    ipv4: FULL_URLS.map(
+      (_, i) => `https://192.168.${i}.42:8080/api?q=one#done`
+    ),
+    ipv6: FULL_URLS.map(
+      (_, i) => `https://[2001:db8:1234:5678::${i}]:8443/api?q=one#done`
+    ),
+    maxHost: FULL_URLS.map(
+      (_, i) =>
+        `https://${`${"a".repeat(62)}.`.repeat(3)}${"b".repeat(58)}${i}.test:8443/api?q=one#done`
+    ),
+    userinfo4096: FULL_URLS.map(
+      (_, i) =>
+        `https://user:${"credential".repeat(410)}@example${i}.test:8443/api?q=one#done`
+    ),
+  })) {
+    result[`authority.${shape}`] = () => {
+      const value = api.view(next(urls));
+      escaped[position & 4095] = value;
+      sink = (sink + value.toString().length) | 0;
+    };
+  }
+  for (const size of [8192, 131072]) {
+    for (const [shape, prefix, suffix] of [
+      ["fragment", "https://x.test/api#", ""],
+      ["fragmentQuestion", "https://x.test/api#", "?not=query"],
+      ["queryFragment", "https://x.test/api?q=one#", ""],
+      ["relativeFragment", "/api#", ""],
+      ["ipv6Query", "https://[2001:db8::1]:8443/api?q=", ""],
+      ["ipv6QueryFragment", "https://[2001:db8::1]:8443/api?q=one#", ""],
+      ["longPathFragment", `https://x.test/${"segment/".repeat(512)}#`, ""],
+      ["unclosedBracket", "https://[::1/api?q=one#", ""],
+    ] as const) {
+      const urls = FULL_URLS.map(
+        (_, i) => `${prefix}${"z".repeat(size)}${i}${suffix}`
+      );
+      result[`construct.${shape}.${size}`] = () => {
+        const value = api.view(next(urls));
+        escaped[position & 4095] = value;
+        sink = (sink + value.toString().length) | 0;
+      };
+    }
+  }
+  for (const [shape, urls, key] of [
+    ["plain", QUERY_URLS, "q"],
+    ["absent", NO_QUERY_URLS, "q"],
+    [
+      "proto",
+      FULL_URLS.map((_, i) => `https://x.test/?__proto__=value${i}`),
+      "__proto__",
+    ],
+  ] as const) {
+    const retained = urls.map((url) => api.view(url));
+    const keys = [key];
+    result[`batchOne.${shape}`] = () => {
+      const value = next(retained).queryParams(keys);
+      escaped[position & 4095] = value;
+      sink = (sink + (value[key]?.length ?? 0)) | 0;
+    };
+  }
+  return result;
+}
+
+const [baselineViewArea, candidateViewArea] = pairCases(viewAreaCases);
+for (const name of Object.keys(baselineViewArea)) {
+  add(`viewArea.${name}`, baselineViewArea[name], candidateViewArea[name]);
+}
 function warm(fn: BenchFn, duration: number, batchSize: number): void {
   position = 0;
   const warmEnd = performance.now() + duration;
@@ -948,7 +1218,11 @@ for (const benchCase of cases) {
   const baselineRates: number[] = [];
   const candidateRates: number[] = [];
   const ratios: number[] = [];
-  const batchSize = benchCase.name.startsWith("scale.bare") ? 16 : 1024;
+  const batchSize =
+    benchCase.name.startsWith("scale.bare") ||
+    benchCase.name.startsWith("readers.collision")
+      ? 16
+      : 1024;
   const first = benchGlobals.URLENS_BENCH_INVERT
     ? benchCase.candidate
     : benchCase.baseline;

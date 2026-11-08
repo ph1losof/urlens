@@ -402,6 +402,16 @@ export function readQueryParams<const K extends readonly string[]>(
     return out as { -readonly [I in keyof K]: string | null };
   }
 
+  locate(rawUrl);
+  const qPos = LOC_Q;
+  if (qPos === -1) {
+    for (let k = 0; k < n; k++) {
+      out[k] = null;
+    }
+    return out as { -readonly [I in keyof K]: string | null };
+  }
+  const end = LOC_F;
+
   // Pack each key's first character and length; use a mask for ambiguity flags.
   const keyPacked: number[] = new Array(n);
   const useAmbigMask = n <= 32;
@@ -415,12 +425,6 @@ export function readQueryParams<const K extends readonly string[]>(
     }
   }
 
-  locate(rawUrl);
-  const qPos = LOC_Q;
-  if (qPos === -1) {
-    return out as { -readonly [I in keyof K]: string | null };
-  }
-  const end = LOC_F;
   if (rawUrl.length - end >= 256 && rawUrl.charCodeAt(end + 1) !== CH_AMP) {
     rawUrl = rawUrl.substring(0, end);
   }
@@ -445,6 +449,8 @@ export function readQueryParams<const K extends readonly string[]>(
           : -2
         : rawUrl.charCodeAt(i) * 65536 + (keyEnd - i);
 
+    // Duplicate requested keys share this field's decoded value.
+    let value: string | undefined;
     for (let k = 0; k < n; k++) {
       if (keyPacked[k] !== fieldPacked) {
         // Also skips already-found slots: those are marked with the -1
@@ -458,8 +464,9 @@ export function readQueryParams<const K extends readonly string[]>(
             : !keyIsAmbiguous(keys[k])) ||
           compareDecodedValueRange(rawUrl, i, keyEnd, keys[k])
         ) {
-          out[k] =
+          value ??=
             eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
+          out[k] = value;
           keyPacked[k] = -1;
           remaining--;
         }
@@ -488,6 +495,7 @@ export function readQueryParams<const K extends readonly string[]>(
         j = amp + 1;
         continue;
       }
+      let value: string | undefined;
       for (let k = 0; k < n; k++) {
         if (keyPacked[k] === -1) {
           continue;
@@ -496,10 +504,11 @@ export function readQueryParams<const K extends readonly string[]>(
           continue;
         }
         if (compareDecodedValueRange(rawUrl, j, keyEnd, keys[k])) {
-          out[k] =
+          value ??=
             fallbackEq === -1 || fallbackEq > amp
               ? ""
               : decodeRange(rawUrl, fallbackEq + 1, amp);
+          out[k] = value;
           keyPacked[k] = -1;
           remaining--;
         }
@@ -553,6 +562,15 @@ export function setQueryParam(
     return `${rawUrl.substring(0, fragmentStart)}?${pair}${rawUrl.substring(fragmentStart)}`;
   }
 
+  // Native searches have no end bound: clip opaque fragments before scanning.
+  // A leading fragment ampersand already stops the last-field search.
+  const originalUrl = rawUrl;
+  if (
+    rawUrl.length - fragmentStart >= 256 &&
+    rawUrl.charCodeAt(fragmentStart + 1) !== CH_AMP
+  ) {
+    rawUrl = rawUrl.substring(0, fragmentStart);
+  }
   const queryStart = qPos + 1;
   const queryEnd = fragmentStart;
   const keyLen = key.length;
@@ -672,11 +690,11 @@ export function setQueryParam(
   }
 
   if (!matched && encoded === null) {
-    return rawUrl;
+    return originalUrl;
   }
 
   const prefix = rawUrl.substring(0, qPos);
-  const suffix = rawUrl.substring(queryEnd);
+  const suffix = originalUrl.substring(queryEnd);
   if (newQuery.length === 0) {
     return prefix + suffix;
   }
@@ -753,6 +771,15 @@ export function setQueryParams(
       keys[k].length === 0 ? 0 : keys[k].charCodeAt(0) * 65536 + keys[k].length;
   }
 
+  // Native searches have no end bound: clip opaque fragments before scanning.
+  // A leading fragment ampersand already stops the last-field search.
+  const originalUrl = rawUrl;
+  if (
+    rawUrl.length - fragmentStart >= 256 &&
+    rawUrl.charCodeAt(fragmentStart + 1) !== CH_AMP
+  ) {
+    rawUrl = rawUrl.substring(0, fragmentStart);
+  }
   const queryStart = qPos + 1;
   const queryEnd = fragmentStart;
   let newQuery = "";
@@ -841,7 +868,7 @@ export function setQueryParams(
   }
 
   const prefix = rawUrl.substring(0, qPos);
-  const suffix = rawUrl.substring(queryEnd);
+  const suffix = originalUrl.substring(queryEnd);
   if (newQuery.length === 0) {
     return prefix + suffix;
   }
@@ -905,6 +932,15 @@ export function removeQueryParams(
     }
   }
 
+  // Native searches have no end bound: clip opaque fragments before scanning.
+  // A leading fragment ampersand already stops the last-field search.
+  const originalUrl = rawUrl;
+  if (
+    rawUrl.length - fragmentStart >= 256 &&
+    rawUrl.charCodeAt(fragmentStart + 1) !== CH_AMP
+  ) {
+    rawUrl = rawUrl.substring(0, fragmentStart);
+  }
   const queryStart = qPos + 1;
   let newQuery = "";
   let removed = false;
@@ -976,11 +1012,11 @@ export function removeQueryParams(
   }
 
   if (!removed) {
-    return rawUrl;
+    return originalUrl;
   }
 
   const prefix = rawUrl.substring(0, qPos);
-  const suffix = rawUrl.substring(queryEnd);
+  const suffix = originalUrl.substring(queryEnd);
   if (newQuery.length === 0) {
     return prefix + suffix;
   }

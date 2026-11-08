@@ -92,7 +92,7 @@ export function findKeyMatch(
 
 // After a substring hit inside a field, jump to the next possible field
 // boundary instead of searching each occurrence in a long value. Cache the
-// question-mark search so queries with many '&' fields stay linear.
+// delimiter searches so repeated collisions cannot rescan the same suffix.
 function findKeyAfterCollision(
   raw: string,
   start: number,
@@ -101,10 +101,13 @@ function findKeyAfterCollision(
 ): number {
   let pos = start;
   let question = -2;
+  let amp = -2;
   while (pos < end) {
-    let amp = raw.indexOf("&", pos);
-    if (amp === -1 || amp > end) {
-      amp = end;
+    if (amp < pos) {
+      amp = raw.indexOf("&", pos);
+      if (amp === -1 || amp > end) {
+        amp = end;
+      }
     }
     if (question !== -1 && question < pos) {
       question = raw.indexOf("?", pos);

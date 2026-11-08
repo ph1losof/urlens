@@ -3,6 +3,18 @@
 Notable changes are documented here. Before 1.0, minor releases may include
 breaking API changes; those changes will be identified below.
 
+## [Unreleased]
+
+### Changed
+
+- Keep key lookups linear when the key name repeats inside another field's value.
+- Return early from multi-key `readQueryParams` calls on URLs without a query, and decode a
+  field once when the same key is requested more than once.
+- Bound `setQueryParam`, `setQueryParams`, and `removeQueryParams` scans before large fragments.
+- Skip searching a long query for `#` in `setPathname`.
+
+The public API and input-handling behavior are unchanged.
+
 ## [0.1.1] - 2026-11-08
 
 ### Changed
