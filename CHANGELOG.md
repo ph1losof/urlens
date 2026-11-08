@@ -3,7 +3,7 @@
 Notable changes are documented here. Before 1.0, minor releases may include
 breaking API changes; those changes will be identified below.
 
-## [Unreleased]
+## [0.1.2] - 2026-11-08
 
 ### Changed
 
