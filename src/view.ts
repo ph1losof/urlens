@@ -7,6 +7,7 @@ import {
   CH_QUESTION,
   CH_SLASH,
   findKeyMatch,
+  findQueryFieldEnd,
   findSchemeEnd,
 } from "./internal.js";
 import {
@@ -14,6 +15,7 @@ import {
   compareQueryValueRange,
   hasQueryParamDecodedFallback,
   keyIsAmbiguous,
+  matchFirstQueryKey,
   queryHasEncoding,
   queryParamDecodedFallback,
   queryParamEqualsDecodedFallback,
@@ -268,10 +270,22 @@ class UrlView implements UrlViewType {
     if (this._queryStart === -1) {
       return null;
     }
-    const raw = this._raw;
+    let raw = this._raw;
     const end = this._queryEnd;
+
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
+    if (raw.length - end >= 256 && raw.charCodeAt(end + 1) !== CH_AMP) {
+      const first = matchFirstQueryKey(raw, queryStart, end, key);
+      if (first !== -1) {
+        if (first === end || raw.charCodeAt(first) === CH_AMP) {
+          return "";
+        }
+        const valueEnd = findQueryFieldEnd(raw, first + 1, end);
+        return decodeRange(raw, first + 1, valueEnd);
+      }
+      raw = raw.substring(0, end);
+    }
 
     if (keyLen !== 0 && !keyIsAmbiguous(key)) {
       const idx = findKeyMatch(raw, queryStart, end, key);
@@ -400,8 +414,11 @@ class UrlView implements UrlViewType {
       return out;
     }
 
-    const raw = this._raw;
+    let raw = this._raw;
     const end = this._queryEnd;
+    if (raw.length - end >= 256 && raw.charCodeAt(end + 1) !== CH_AMP) {
+      raw = raw.substring(0, end);
+    }
 
     // Pack each key's first character and length; -1 marks resolved slots.
     // Store ambiguity flags in a bit mask when possible.
@@ -511,10 +528,18 @@ class UrlView implements UrlViewType {
     if (this._queryStart === -1) {
       return false;
     }
-    const raw = this._raw;
+    let raw = this._raw;
     const end = this._queryEnd;
+
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
+    if (raw.length - end >= 256 && raw.charCodeAt(end + 1) !== CH_AMP) {
+      const first = matchFirstQueryKey(raw, queryStart, end, key);
+      if (first !== -1) {
+        return true;
+      }
+      raw = raw.substring(0, end);
+    }
 
     if (keyLen !== 0 && !keyIsAmbiguous(key)) {
       if (findKeyMatch(raw, queryStart, end, key) !== -1) {
@@ -564,10 +589,24 @@ class UrlView implements UrlViewType {
     if (this._queryStart === -1) {
       return false;
     }
-    const raw = this._raw;
+    let raw = this._raw;
     const end = this._queryEnd;
+
     const queryStart = this._queryStart + 1;
     const keyLen = key.length;
+    if (raw.length - end >= 256 && raw.charCodeAt(end + 1) !== CH_AMP) {
+      const first = matchFirstQueryKey(raw, queryStart, end, key);
+      if (first !== -1) {
+        if (first === end || raw.charCodeAt(first) === CH_AMP) {
+          return expected.length === 0;
+        }
+        const valueEnd = findQueryFieldEnd(raw, first + 1, end);
+        return expected.length < 64
+          ? compareDecodedValueRange(raw, first + 1, valueEnd, expected)
+          : compareQueryValueRange(raw, first + 1, valueEnd, expected);
+      }
+      raw = raw.substring(0, end);
+    }
 
     if (keyLen !== 0 && !keyIsAmbiguous(key)) {
       const idx = findKeyMatch(raw, queryStart, end, key);

@@ -233,3 +233,22 @@ export function parsePortRange(s: string, start: number, end: number): number {
   }
   return port;
 }
+
+// Used only when a large fragment follows the query. Short values can be
+// scanned without allocating a prefix; long values use a bounded native scan.
+export function findQueryFieldEnd(
+  raw: string,
+  start: number,
+  end: number
+): number {
+  if (end - start >= 64) {
+    const offset = raw.substring(start, end).indexOf("&");
+    return offset === -1 ? end : start + offset;
+  }
+  for (let i = start; i < end; i++) {
+    if (raw.charCodeAt(i) === CH_AMP) {
+      return i;
+    }
+  }
+  return end;
+}

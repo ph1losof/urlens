@@ -1,7 +1,16 @@
 import { deepStrictEqual } from "node:assert/strict";
 import { join, resolve } from "node:path";
-import * as candidate from "../src/index.js";
-import { findKeyMatch } from "../src/internal.js";
+import * as current from "../src/index.js";
+import * as currentInternal from "../src/internal.js";
+
+const candidateRoot = process.env.URLENS_BENCH_CANDIDATE;
+const candidate: typeof current = candidateRoot
+  ? await import(join(resolve(candidateRoot), "src/index.ts"))
+  : current;
+const candidateInternal: typeof currentInternal = candidateRoot
+  ? await import(join(resolve(candidateRoot), "src/internal.ts"))
+  : currentInternal;
+const { findKeyMatch } = candidateInternal;
 
 const baselineRoot = process.env.URLENS_BENCH_BASELINE;
 if (!baselineRoot) {
@@ -122,6 +131,75 @@ for (let sample = 0; sample < 25000; sample++) {
     baseline.view(url).queryParamEquals(key, value ?? ""),
     input
   );
+}
+
+// Delimiters and matches in a large fragment must never participate in a
+// query read. Include the exact bounded-prefix cutoff and encoded/bare fields.
+const fragmentTails = [
+  "z".repeat(254),
+  "z".repeat(255),
+  "z".repeat(256),
+  "z".repeat(257),
+  "z".repeat(8192),
+  "z".repeat(131072),
+  `&%+missing=${"z".repeat(8192)}`,
+  "?a=outside&b=outside%25+wrong#".repeat(512),
+];
+for (let sample = 0; sample < 5000; sample++) {
+  const query = Array.from({ length: pick([0, 1, 4, 16]) }, () =>
+    pick(fields)
+  ).join("&");
+  const url = `/path?${query}#${pick(fragmentTails)}`;
+  const key = pick(keys);
+  const expected = pick(["", "1", "2", "a b", "☕", "�"]);
+  const requested = [key, pick(keys), pick(keys)];
+  const actualView = candidate.view(url);
+  const baselineView = baseline.view(url);
+  const input = { url, key, expected, requested };
+  equal(
+    candidate.readQueryParam(url, key),
+    baseline.readQueryParam(url, key),
+    input
+  );
+  equal(
+    candidate.hasQueryParam(url, key),
+    baseline.hasQueryParam(url, key),
+    input
+  );
+  equal(
+    candidate.queryParamEquals(url, key, expected),
+    baseline.queryParamEquals(url, key, expected),
+    input
+  );
+  equal(
+    candidate.readQueryParams(url, requested),
+    baseline.readQueryParams(url, requested),
+    input
+  );
+  equal(
+    candidate.readQueryParams(url, requested.slice(0, 2)),
+    baseline.readQueryParams(url, requested.slice(0, 2)),
+    input
+  );
+  equal(actualView.queryParam(key), baselineView.queryParam(key), input);
+  equal(actualView.hasQueryParam(key), baselineView.hasQueryParam(key), input);
+  equal(
+    actualView.queryParamEquals(key, expected),
+    baselineView.queryParamEquals(key, expected),
+    input
+  );
+  equal(
+    actualView.queryParams(requested),
+    baselineView.queryParams(requested),
+    input
+  );
+  equal(
+    actualView.queryParams(requested.slice(0, 2)),
+    baselineView.queryParams(requested.slice(0, 2)),
+    input
+  );
+  equal(actualView.toString(), url, input);
+  equal(actualView.fragment(), baselineView.fragment(), input);
 }
 
 const choices = ["", "a=1", "q=old", "q", "=empty"];

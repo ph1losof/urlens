@@ -1,11 +1,12 @@
 import { decodeRange } from "./decode.js";
 import { encodeQueryComponent } from "./encode.js";
-import { CH_AMP, findKeyMatch } from "./internal.js";
+import { CH_AMP, findKeyMatch, findQueryFieldEnd } from "./internal.js";
 import {
   compareDecodedValueRange,
   compareQueryValueRange,
   hasQueryParamDecodedFallback,
   keyIsAmbiguous,
+  matchFirstQueryKey,
   queryHasEncoding,
   queryParamDecodedFallback,
   queryParamEqualsDecodedFallback,
@@ -172,6 +173,11 @@ function readTwoQueryParams(
   }
 
   const end = LOC_F;
+  // A leading fragment ampersand already stops field scans immediately.
+  // Otherwise clip large suffixes before walking all requested fields.
+  if (rawUrl.length - end >= 256 && rawUrl.charCodeAt(end + 1) !== CH_AMP) {
+    rawUrl = rawUrl.substring(0, end);
+  }
   const key0 = keys[0];
   const key1 = keys[1];
   const len0 = key0.length;
@@ -292,7 +298,19 @@ export function readQueryParam(rawUrl: string, key: string): string | null {
     return null;
   }
   const end = LOC_F;
+
   const keyLen = key.length;
+  if (rawUrl.length - end >= 256 && rawUrl.charCodeAt(end + 1) !== CH_AMP) {
+    const first = matchFirstQueryKey(rawUrl, qPos + 1, end, key);
+    if (first !== -1) {
+      if (first === end || rawUrl.charCodeAt(first) === CH_AMP) {
+        return "";
+      }
+      const valueEnd = findQueryFieldEnd(rawUrl, first + 1, end);
+      return decodeRange(rawUrl, first + 1, valueEnd);
+    }
+    rawUrl = rawUrl.substring(0, end);
+  }
   const queryStart = qPos + 1;
 
   if (keyLen !== 0 && !keyIsAmbiguous(key)) {
@@ -403,6 +421,9 @@ export function readQueryParams<const K extends readonly string[]>(
     return out as { -readonly [I in keyof K]: string | null };
   }
   const end = LOC_F;
+  if (rawUrl.length - end >= 256 && rawUrl.charCodeAt(end + 1) !== CH_AMP) {
+    rawUrl = rawUrl.substring(0, end);
+  }
 
   // Pass 1: byte-strict.
   let remaining = n;
@@ -986,8 +1007,19 @@ export function hasQueryParam(rawUrl: string, key: string): boolean {
     return false;
   }
   const fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+
   const queryStart = qPos + 1;
   const keyLen = key.length;
+  if (
+    rawUrl.length - fragmentStart >= 256 &&
+    rawUrl.charCodeAt(fragmentStart + 1) !== CH_AMP
+  ) {
+    const first = matchFirstQueryKey(rawUrl, queryStart, fragmentStart, key);
+    if (first !== -1) {
+      return true;
+    }
+    rawUrl = rawUrl.substring(0, fragmentStart);
+  }
 
   if (keyLen !== 0 && !keyIsAmbiguous(key)) {
     if (findKeyMatch(rawUrl, queryStart, fragmentStart, key) !== -1) {
@@ -1067,8 +1099,25 @@ export function queryParamEquals(
     return false;
   }
   const fragmentStart = hPos === -1 ? rawUrl.length : hPos;
+
   const queryStart = qPos + 1;
   const keyLen = key.length;
+  if (
+    rawUrl.length - fragmentStart >= 256 &&
+    rawUrl.charCodeAt(fragmentStart + 1) !== CH_AMP
+  ) {
+    const first = matchFirstQueryKey(rawUrl, queryStart, fragmentStart, key);
+    if (first !== -1) {
+      if (first === fragmentStart || rawUrl.charCodeAt(first) === CH_AMP) {
+        return expected.length === 0;
+      }
+      const valueEnd = findQueryFieldEnd(rawUrl, first + 1, fragmentStart);
+      return expected.length < 64
+        ? compareDecodedValueRange(rawUrl, first + 1, valueEnd, expected)
+        : compareQueryValueRange(rawUrl, first + 1, valueEnd, expected);
+    }
+    rawUrl = rawUrl.substring(0, fragmentStart);
+  }
 
   if (keyLen !== 0 && !keyIsAmbiguous(key)) {
     const idx = findKeyMatch(rawUrl, queryStart, fragmentStart, key);

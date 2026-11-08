@@ -65,11 +65,11 @@ Local Bun bundler estimates, minified and gzip-compressed:
 
 | Import | Estimated gzip size |
 |---|---:|
-| Full API | about 8.2 KB |
+| Full API | about 8.5 KB |
 | `readPathname` | about 0.45 KB |
-| `readQueryParam` | about 2.0 KB |
-| `queryParamEquals` | about 1.5 KB |
-| `view` | about 3.6 KB |
+| `readQueryParam` | about 2.1 KB |
+| `queryParamEquals` | about 1.6 KB |
+| `view` | about 3.9 KB |
 | `encodeQueryComponent` | about 0.5 KB |
 
 Named ESM imports are tree-shakeable, the package declares `sideEffects: false`,
@@ -132,7 +132,8 @@ regenerate the marked block, or
 `URLENS_BENCH_BASELINE=/path/to/baseline bun run bench:ab` for paired
 baseline/candidate profiling in one browser process.
 
-See [performance analysis](bench/PERFORMANCE.md) for the query and component changes,
+See [performance analysis](bench/PERFORMANCE.md) and the latest
+[fragment-boundary analysis](bench/FRAGMENT_PERFORMANCE.md) for the query and component changes,
 paired before/after measurements, validation, and reproduction instructions.
 
 ## Runtime Requirements

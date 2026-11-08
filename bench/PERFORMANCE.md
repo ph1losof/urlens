@@ -1,5 +1,10 @@
 # Performance analysis
 
+This report records the optimization passes published at `4d4dc02`. See the
+[latest fragment-boundary pass](FRAGMENT_PERFORMANCE.md) for current measurements,
+validation, and sizes. Historical tables below retain their original harness;
+the current runner additionally balances factory setup, warmup, and timing order.
+
 The selected changes remove repeated scans and defer work until a match is
 plausible. They preserve the public API and add no runtime dependencies or
 persistent caches. Timing results are workload-specific; an absolute fastest
@@ -192,9 +197,9 @@ public exports. Gzip and correctness costs are recorded below.
 | Exact-case `startsWith` scheme shortcut | It improved exact matches but slowed WebKit case-folded matches by about 18% and same-length misses by 27%. The validated ASCII-mask loop was selected instead. |
 | Guarded native encoding-prefix scans | Trials showed about 2–3.4× gains on long safe prefixes but did not establish a balanced result across short and Unicode inputs. An isolated scalar helper slowed short strings by about 8–10%. Some Unicode deltas are confounded by the identical-source control variation above. The original encoder was retained. |
 
-## Correctness and packaging
+## Component-pass correctness and packaging
 
-The complete CI command passes: formatting, linting, TypeScript, 402 tests, the
+At `4d4dc02`, the complete CI command passed: formatting, linting, TypeScript, 402 tests, the
 99% coverage gate, package build/inspection, and installed-package consumer
 checks. Public exports remain at 28. Regression cases cover long values,
 malformed and truncated UTF-8, plus/space equality, bounded ranges, duplicate and
@@ -203,7 +208,7 @@ and fragments. Additional cases cover long-query pathname boundaries, frozen
 views, malformed authorities, each digit of four-character ports, scheme control
 characters, and long encoding prefixes with lone surrogates (encoder controls).
 
-`scripts/verify-baseline.ts` performs 1,024,875 deterministic comparisons against
+The `4d4dc02` version of `scripts/verify-baseline.ts` performs 1,024,875 deterministic comparisons against
 the original code, including generated API calls, exhaustive empty-field layouts,
 large key lists, and 703,125 exhaustive raw-key searches. Its fixed seed is
 123456789. Run it against the original or reconstructed previous-pass baseline.
@@ -217,7 +222,7 @@ snapshots (892,608 comparisons).
 
 Local minified browser export bundles, gzip bytes:
 
-| Import | Original | First pass | Query passes | Current |
+| Import | Original | First pass | Query passes | Component pass |
 | --- | ---: | ---: | ---: | ---: |
 | Full API | 7,877 | 8,074 | 8,172 | 8,218 |
 | `readPathname` | 408 | 408 | 408 | 451 |

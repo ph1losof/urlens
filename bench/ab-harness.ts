@@ -149,6 +149,16 @@ function add(name: string, baselineFn: BenchFn, candidateFn: BenchFn): void {
   cases.push({ name, baseline: baselineFn, candidate: candidateFn });
 }
 
+// Reverse setup as well as measurement order: allocating both implementations
+// in a fixed order can bias object shapes and GC-sensitive A/A controls.
+function pairCases<T>(factory: (api: Api) => T): [T, T] {
+  if (benchGlobals.URLENS_BENCH_INVERT) {
+    const candidateCases = factory(candidate);
+    return [factory(baseline), candidateCases];
+  }
+  return [factory(baseline), factory(candidate)];
+}
+
 function componentCases(api: Api): Record<string, BenchFn> {
   const retained = COMPLEX_URLS.map((url) => api.view(url));
   const escaped = new Array<ReturnType<Api["view"]>>(4096);
@@ -350,12 +360,9 @@ function flatCases(api: Api): Record<string, BenchFn> {
   };
 }
 
-const baselineComponents = componentCases(baseline);
-const candidateComponents = componentCases(candidate);
-const baselineQueries = queryCases(baseline);
-const candidateQueries = queryCases(candidate);
-const baselineFlat = flatCases(baseline);
-const candidateFlat = flatCases(candidate);
+const [baselineComponents, candidateComponents] = pairCases(componentCases);
+const [baselineQueries, candidateQueries] = pairCases(queryCases);
+const [baselineFlat, candidateFlat] = pairCases(flatCases);
 
 add(
   "view.construct.escape",
@@ -534,8 +541,7 @@ function scalingCases(api: Api): Record<string, BenchFn> {
   return result;
 }
 
-const baselineScaling = scalingCases(baseline);
-const candidateScaling = scalingCases(candidate);
+const [baselineScaling, candidateScaling] = pairCases(scalingCases);
 for (const name of Object.keys(baselineScaling)) {
   add(`scale.${name}`, baselineScaling[name], candidateScaling[name]);
 }
@@ -669,8 +675,7 @@ function additionalCases(api: Api): Record<string, BenchFn> {
   return result;
 }
 
-const baselineAdditional = additionalCases(baseline);
-const candidateAdditional = additionalCases(candidate);
+const [baselineAdditional, candidateAdditional] = pairCases(additionalCases);
 for (const name of Object.keys(baselineAdditional)) {
   add(`extra.${name}`, baselineAdditional[name], candidateAdditional[name]);
 }
@@ -808,10 +813,68 @@ function otherAreaCases(api: Api): Record<string, BenchFn> {
   return result;
 }
 
-const baselineOtherAreas = otherAreaCases(baseline);
-const candidateOtherAreas = otherAreaCases(candidate);
+const [baselineOtherAreas, candidateOtherAreas] = pairCases(otherAreaCases);
 for (const name of Object.keys(baselineOtherAreas)) {
   add(`area.${name}`, baselineOtherAreas[name], candidateOtherAreas[name]);
+}
+
+function boundaryCases(api: Api): Record<string, BenchFn> {
+  const result: Record<string, BenchFn> = {};
+  const escaped = new Array<unknown>(4096);
+  for (const [name, size] of [
+    ["short", 32],
+    ["8k", 8192],
+    ["128k", 131072],
+    ["markers8k", 8192],
+  ] as const) {
+    const urls = FULL_URLS.map(
+      (_, i) =>
+        `https://x.test/api?first=one&last=two#${name === "markers8k" ? "&%+missing=" : ""}${"z".repeat(size)}${i}`
+    );
+    const retained = urls.map((url) => api.view(url));
+    result[`${name}.first`] = () => {
+      sink =
+        (sink + (api.readQueryParam(next(urls), "first")?.length ?? 0)) | 0;
+    };
+    result[`${name}.hasFirst`] = () => {
+      sink = (sink + (api.hasQueryParam(next(urls), "first") ? 1 : 0)) | 0;
+    };
+    result[`${name}.hit`] = () => {
+      sink = (sink + (api.readQueryParam(next(urls), "last")?.length ?? 0)) | 0;
+    };
+    result[`${name}.miss`] = () => {
+      sink =
+        (sink + (api.readQueryParam(next(urls), "missing")?.length ?? 0)) | 0;
+    };
+    result[`${name}.has`] = () => {
+      sink = (sink + (api.hasQueryParam(next(urls), "missing") ? 1 : 0)) | 0;
+    };
+    result[`${name}.equals`] = () => {
+      sink =
+        (sink + (api.queryParamEquals(next(urls), "last", "two") ? 1 : 0)) | 0;
+    };
+    result[`${name}.batch`] = () => {
+      const value = api.readQueryParams(next(urls), [
+        "first",
+        "last",
+        "missing",
+      ]);
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+    result[`${name}.retainedHit`] = () => {
+      sink = (sink + (next(retained).queryParam("last")?.length ?? 0)) | 0;
+    };
+    result[`${name}.retainedMiss`] = () => {
+      sink = (sink + (next(retained).queryParam("missing")?.length ?? 0)) | 0;
+    };
+  }
+  return result;
+}
+
+const [baselineBoundaries, candidateBoundaries] = pairCases(boundaryCases);
+for (const name of Object.keys(baselineBoundaries)) {
+  add(`boundary.${name}`, baselineBoundaries[name], candidateBoundaries[name]);
 }
 
 function warm(fn: BenchFn, duration: number, batchSize: number): void {
@@ -886,12 +949,18 @@ for (const benchCase of cases) {
   const candidateRates: number[] = [];
   const ratios: number[] = [];
   const batchSize = benchCase.name.startsWith("scale.bare") ? 16 : 1024;
-  warm(benchCase.baseline, Math.min(200, budget), batchSize);
-  warm(benchCase.candidate, Math.min(200, budget), batchSize);
+  const first = benchGlobals.URLENS_BENCH_INVERT
+    ? benchCase.candidate
+    : benchCase.baseline;
+  const second = benchGlobals.URLENS_BENCH_INVERT
+    ? benchCase.baseline
+    : benchCase.candidate;
+  warm(first, Math.min(200, budget), batchSize);
+  warm(second, Math.min(200, budget), batchSize);
   for (let round = 0; round < rounds; round++) {
     let baselineRate: number;
     let candidateRate: number;
-    if ((round & 1) === 0) {
+    if (((round + (benchGlobals.URLENS_BENCH_INVERT ? 1 : 0)) & 1) === 0) {
       baselineRate = runFor(benchCase.baseline, budget, batchSize);
       candidateRate = runFor(benchCase.candidate, budget, batchSize);
     } else {

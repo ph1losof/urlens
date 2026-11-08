@@ -341,3 +341,107 @@ test("compact views agree with flat component readers on mixed authorities", () 
     expect(result.fragment()).toBe(readFragment(url));
   }
 });
+
+describe("query scans before large fragments", () => {
+  test("retains the native path when an ampersand starts the fragment", () => {
+    const fragment = `&%+missing=${"z".repeat(8192)}`;
+    const url = `/?first=one&flag&last=two#${fragment}`;
+    const result = view(url);
+    expect(readQueryParam(url, "last")).toBe("two");
+    expect(result.queryParam("last")).toBe("two");
+    expect(hasQueryParam(url, "missing")).toBe(false);
+    expect(result.hasQueryParam("missing")).toBe(false);
+    expect(queryParamEquals(url, "last", "two")).toBe(true);
+    expect(result.queryParamEquals("last", "two")).toBe(true);
+    expect(readQueryParams(url, ["first", "last"])).toEqual(["one", "two"]);
+    expect(result.queryParams(["first", "last", "missing"])).toEqual({
+      first: "one",
+      last: "two",
+      missing: null,
+    });
+    expect(result.fragment()).toBe(fragment);
+  });
+
+  test("bounds flat and retained reads and preserves the original view", () => {
+    const fragment = `${"z".repeat(8192)}?last=outside&missing=outside%25+tail#end`;
+    const url = `https://x.test/api?first=one&flag&last=two#${fragment}`;
+    const result = view(url);
+    for (const [key, value] of [
+      ["first", "one"],
+      ["flag", ""],
+      ["last", "two"],
+      ["missing", null],
+    ] as const) {
+      expect(readQueryParam(url, key)).toBe(value);
+      expect(result.queryParam(key)).toBe(value);
+      expect(hasQueryParam(url, key)).toBe(value !== null);
+      expect(result.hasQueryParam(key)).toBe(value !== null);
+      expect(queryParamEquals(url, key, value ?? "wrong")).toBe(value !== null);
+      expect(result.queryParamEquals(key, value ?? "wrong")).toBe(
+        value !== null
+      );
+    }
+    expect(readQueryParams(url, ["first", "last"])).toEqual(["one", "two"]);
+    expect(readQueryParams(url, ["first", "last", "missing"])).toEqual([
+      "one",
+      "two",
+      null,
+    ]);
+    expect(result.queryParams(["first", "last", "missing"])).toEqual({
+      first: "one",
+      last: "two",
+      missing: null,
+    });
+    expect(result.toString()).toBe(url);
+    expect(result.fragment()).toBe(fragment);
+  });
+
+  test("handles bare keys, empty values, and both sides of the suffix cutoff", () => {
+    for (const length of [0, 254, 255, 256, 257, 8192]) {
+      const suffix = `#${"z".repeat(length)}`;
+      for (const query of [
+        "flag",
+        "flag=",
+        "flag&last=two",
+        "flag=&last=two",
+      ]) {
+        const url = `/?${query}${suffix}`;
+        const result = view(url);
+        expect(readQueryParam(url, "flag")).toBe("");
+        expect(result.queryParam("flag")).toBe("");
+        expect(hasQueryParam(url, "flag")).toBe(true);
+        expect(result.hasQueryParam("flag")).toBe(true);
+        expect(queryParamEquals(url, "flag", "")).toBe(true);
+        expect(queryParamEquals(url, "flag", "wrong")).toBe(false);
+        expect(result.queryParamEquals("flag", "")).toBe(true);
+        expect(result.queryParamEquals("flag", "wrong")).toBe(false);
+      }
+    }
+  });
+
+  test("bounds long values and retains decoded key matching", () => {
+    const suffix = `#${"z".repeat(8192)}&first=outside`;
+    const long = "value".repeat(30);
+    for (const query of [`first=${long}`, `first=${long}&last=two`]) {
+      const url = `/?${query}${suffix}`;
+      expect(readQueryParam(url, "first")).toBe(long);
+      expect(view(url).queryParam("first")).toBe(long);
+      expect(queryParamEquals(url, "first", long)).toBe(true);
+      expect(view(url).queryParamEquals("first", long)).toBe(true);
+    }
+    const url = `/?a+b=space&a%2Bb=plus&%ZZ=literal&=empty&☕=tea${suffix}`;
+    const result = view(url);
+    for (const [key, value] of [
+      ["a b", "space"],
+      ["a+b", "plus"],
+      ["%ZZ", "literal"],
+      ["", "empty"],
+      ["☕", "tea"],
+    ]) {
+      expect(readQueryParam(url, key)).toBe(value);
+      expect(result.queryParam(key)).toBe(value);
+      expect(queryParamEquals(url, key, value)).toBe(true);
+      expect(result.queryParamEquals(key, value)).toBe(true);
+    }
+  });
+});

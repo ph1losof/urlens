@@ -337,3 +337,27 @@ export function queryParamEqualsDecodedFallback(
     ? compareDecodedValueRange(raw, valStart, FB_AMP, expected)
     : compareQueryValueRange(raw, valStart, FB_AMP, expected);
 }
+
+// Return the raw end of a matching first key, or -1. Only used for large
+// fragment suffixes; the ordinary readers keep their existing fast paths.
+export function matchFirstQueryKey(
+  raw: string,
+  start: number,
+  end: number,
+  key: string
+): number {
+  const after = start + key.length;
+  if (
+    key.length === 0 ||
+    after > end ||
+    keyIsAmbiguous(key) ||
+    !raw.startsWith(key, start)
+  ) {
+    return -1;
+  }
+  if (after === end) {
+    return after;
+  }
+  const next = raw.charCodeAt(after);
+  return next === CH_AMP || next === CH_EQUALS ? after : -1;
+}
