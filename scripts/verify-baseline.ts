@@ -134,7 +134,7 @@ for (let sample = 0; sample < 25000; sample++) {
 }
 
 // Delimiters and matches in a large fragment must never participate in a
-// query read. Include the exact bounded-prefix cutoff and encoded/bare fields.
+// query read or mutation. Include the exact bounded-prefix cutoff and encoded/bare fields.
 const fragmentTails = [
   "z".repeat(254),
   "z".repeat(255),
@@ -153,6 +153,31 @@ for (let sample = 0; sample < 5000; sample++) {
   const key = pick(keys);
   const expected = pick(["", "1", "2", "a b", "☕", "�"]);
   const requested = [key, pick(keys), pick(keys)];
+  const params = {
+    [key]: expected,
+    [requested[1]]: null,
+    [requested[2]]: "new",
+  };
+  equal(
+    candidate.setQueryParam(url, key, expected),
+    baseline.setQueryParam(url, key, expected),
+    { url, key, expected }
+  );
+  equal(
+    candidate.setQueryParam(url, key, null),
+    baseline.setQueryParam(url, key, null),
+    { url, key }
+  );
+  equal(
+    candidate.setQueryParams(url, params),
+    baseline.setQueryParams(url, params),
+    { url, params }
+  );
+  equal(
+    candidate.removeQueryParams(url, requested),
+    baseline.removeQueryParams(url, requested),
+    { url, requested }
+  );
   const actualView = candidate.view(url);
   const baselineView = baseline.view(url);
   const input = { url, key, expected, requested };

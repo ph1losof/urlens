@@ -21,6 +21,7 @@ import {
   readPathname,
   readPort,
   readScheme,
+  setPathname,
 } from "../src/url.js";
 import { view } from "../src/view.js";
 
@@ -34,6 +35,27 @@ describe("substring collisions during query lookup", () => {
     expect(
       readQueryParam(`/?q=${"a".repeat(4096)}&z=1#a=outside`, "a")
     ).toBeNull();
+  });
+
+  test("retains both delimiter positions across question-mark collisions", () => {
+    const collisions = "?targeted".repeat(1024);
+    for (const query of [
+      `q=${collisions}&target=right`,
+      `q=${collisions}&other=1&q=${collisions}&target=right`,
+      `q=${collisions}?target=right`,
+    ]) {
+      const url = `/?${query}#target=outside`;
+      expect(readQueryParam(url, "target")).toBe("right");
+      expect(hasQueryParam(url, "target")).toBe(true);
+      expect(queryParamEquals(url, "target", "right")).toBe(true);
+      expect(view(url).queryParam("target")).toBe("right");
+    }
+    for (const tail of ["", "&other=1", "?other=1", "&targeted=wrong"]) {
+      const url = `/?q=${collisions}${tail}#target=outside`;
+      expect(readQueryParam(url, "target")).toBeNull();
+      expect(hasQueryParam(url, "target")).toBe(false);
+      expect(queryParamEquals(url, "target", "outside")).toBe(false);
+    }
   });
 
   test("handles question marks in a requested key after value collisions", () => {
@@ -445,3 +467,225 @@ describe("query scans before large fragments", () => {
     }
   });
 });
+
+test("query-free batches initialize every slot without inspecting key metadata", () => {
+  for (const count of [2, 3, 4, 8, 32, 33, 64]) {
+    const keys = Array.from({ length: count }, (_, i) => `${i}%+&=☕`);
+    for (const url of [
+      "",
+      "/path",
+      "/path#fragment?not=a-query",
+      "/path#end",
+    ]) {
+      expect(readQueryParams(url, keys)).toEqual(new Array(count).fill(null));
+    }
+    expect(readQueryParams("/?", keys)).toEqual(new Array(count).fill(null));
+  }
+});
+
+test("duplicate batch slots share each field's decoded value and preserve byte priority", () => {
+  for (const count of [3, 4, 32, 33]) {
+    for (const [field, key] of [
+      ["message", "message"],
+      ["encoded%20key", "encoded key"],
+      ["%ZZ", "%ZZ"],
+      ["", ""],
+    ]) {
+      const keys = new Array<string>(count).fill(key);
+      for (const raw of ["", "caf%C3%A9+".repeat(20), "%FF%ZZ+%41"]) {
+        const expected = decodeQueryComponent(raw);
+        expect(
+          readQueryParams(`/?${field}=${raw}&${field}=second#end`, keys)
+        ).toEqual(new Array(count).fill(expected));
+      }
+      if (key !== "") {
+        expect(readQueryParams(`/?${field}&other=x#end`, keys)).toEqual(
+          new Array(count).fill("")
+        );
+      }
+    }
+  }
+  expect(readQueryParams("/?%61=decoded&a=raw", ["a", "a", "a"])).toEqual([
+    "raw",
+    "raw",
+    "raw",
+  ]);
+});
+
+describe("query mutation before large fragments", () => {
+  test("preserves the exact fragment across the scan cutoff", () => {
+    // The cutoff includes '#': 254 fragment characters stay on the native path,
+    // while 255 characters use the bounded query string.
+    for (const size of [254, 255, 256, 8192]) {
+      for (const markers of ["", "&%+missing="]) {
+        const tail = "?last=outside&missing=x%FF+end#tail";
+        const suffix = `#${markers}${"z".repeat(size - markers.length - tail.length)}${tail}`;
+        const url = `/?first=one&last=two${suffix}`;
+        expect(setQueryParam(url, "last", "updated")).toBe(
+          `/?first=one&last=updated${suffix}`
+        );
+        expect(setQueryParam(url, "last", "two")).toBe(url);
+        expect(setQueryParam(url, "missing", "new")).toBe(
+          `/?first=one&last=two&missing=new${suffix}`
+        );
+        expect(setQueryParam(url, "last", null)).toBe(`/?first=one${suffix}`);
+        expect(setQueryParam(url, "missing", null)).toBe(url);
+        expect(
+          setQueryParams(url, { first: "updated", last: null, added: "new" })
+        ).toBe(`/?first=updated&added=new${suffix}`);
+        expect(removeQueryParams(url, ["first", "last"])).toBe(`/${suffix}`);
+        expect(removeQueryParams(url, ["missing", "absent"])).toBe(url);
+      }
+    }
+  });
+
+  test("bounds bare-field and decoded-key scans and prefix normalization", () => {
+    const suffix = `#${"z".repeat(8192)}&target=outside%25+end`;
+    const url = `/?&&flag&bare&a%20b=1&a+b=2&%ZZ=3&%25ZZ=4&tail${suffix}`;
+    expect(setQueryParam(url, "a b", "c d")).toBe(
+      `/?flag&bare&a+b=c+d&%ZZ=3&%25ZZ=4&tail${suffix}`
+    );
+    expect(setQueryParam(url, "%ZZ", null)).toBe(
+      `/?flag&bare&a%20b=1&a+b=2&tail${suffix}`
+    );
+    expect(setQueryParam(url, "missing", "new")).toBe(
+      `/?flag&bare&a%20b=1&a+b=2&%ZZ=3&%25ZZ=4&tail&missing=new${suffix}`
+    );
+    expect(setQueryParams(url, { "a b": "new", "%ZZ": null })).toBe(
+      `/?flag&bare&a+b=new&tail${suffix}`
+    );
+    expect(removeQueryParams(url, ["a b", "%ZZ"])).toBe(
+      `/?flag&bare&tail${suffix}`
+    );
+    expect(setQueryParam(`/?&&last=1&${suffix}`, "last", null)).toBe(
+      `/${suffix}`
+    );
+    expect(removeQueryParams(`/?&&last=1&${suffix}`, ["last", "x"])).toBe(
+      `/${suffix}`
+    );
+    expect(setQueryParam(`/?${suffix}`, "x", "1")).toBe(`/?x=1${suffix}`);
+    expect(setQueryParams(`/?${suffix}`, { x: "1", y: "2" })).toBe(
+      `/?x=1&y=2${suffix}`
+    );
+  });
+});
+
+describe("pathname replacement before long query tails", () => {
+  test("preserves suffixes at the URL length and query-position cutoffs", () => {
+    for (const total of [255, 256, 257, 8192]) {
+      for (const queryAt of [0, 1, 126, 127, 128, 129]) {
+        for (const origin of ["", "https://x.test"]) {
+          if (origin.length > queryAt) {
+            continue;
+          }
+          const path = "/".repeat(queryAt - origin.length);
+          const prefix = origin + path;
+          const suffix = `?${"x".repeat(total - prefix.length - 1)}`;
+          expect(setPathname(prefix + suffix, "new")).toBe(
+            `${origin}/new${suffix}`
+          );
+          if (path.length !== 0) {
+            expect(setPathname(prefix + suffix, path)).toBe(prefix + suffix);
+          }
+          expect(setPathname(`${prefix}${suffix}#end`, "/new")).toBe(
+            `${origin}/new${suffix}#end`
+          );
+        }
+      }
+    }
+  });
+
+  test("keeps the first fragment when it precedes a query marker", () => {
+    for (const origin of ["", "https://x.test"]) {
+      const fragment = `#first#second?${"x".repeat(8192)}`;
+      expect(setPathname(`${origin}/old${fragment}`, "/new")).toBe(
+        `${origin}/new${fragment}`
+      );
+      expect(setPathname(`${origin}/old#?${"x".repeat(8192)}`, "/new")).toBe(
+        `${origin}/new#?${"x".repeat(8192)}`
+      );
+    }
+    const suffix = `#${"x".repeat(8192)}`;
+    expect(setPathname(`https://x.test/old${suffix}`, "/new")).toBe(
+      `https://x.test/new${suffix}`
+    );
+    expect(setPathname(`https://x.test?${"x".repeat(8192)}`, "")).toBe(
+      `https://x.test/?${"x".repeat(8192)}`
+    );
+  });
+});
+
+describe("decoder handling of invalid UTF-8 lead bytes", () => {
+  test("matches decodeURIComponent or the tolerant path for every lead shape", () => {
+    const leads = [
+      "%41",
+      "%7F",
+      "%80",
+      "%BF",
+      "%C1",
+      "%C2",
+      "%E9",
+      "%F4",
+      "%F5",
+      "%FF",
+      "%ZZ",
+      "%4",
+      "%",
+    ];
+    const nexts = [
+      "",
+      "%A9",
+      "%80",
+      "%BF",
+      "%7F",
+      "%C0",
+      "%ZZ",
+      "%A",
+      "%",
+      "+",
+      "x",
+      "%82%AC",
+    ];
+    for (const pad of ["", "x".repeat(70)]) {
+      for (const lead of leads) {
+        for (const next of nexts) {
+          for (const tail of ["", "+y", "%41"]) {
+            const raw = `${pad}${lead}${next}${tail}`;
+            let expected: string;
+            try {
+              expected = decodeURIComponent(raw.replaceAll("+", " "));
+            } catch {
+              expected = decodeQueryComponentReference(raw);
+            }
+            expect(decodeQueryComponent(raw)).toBe(expected);
+            expect(decodeRange(`?${raw}&`, 1, raw.length + 1)).toBe(expected);
+          }
+        }
+      }
+    }
+    expect(decodeQueryComponent("caf%E9+cr%E8me")).toBe("caf\uFFFD cr\uFFFDme");
+    expect(decodeQueryComponent("%C3%A9")).toBe("é");
+    expect(decodeQueryComponent("%F0%9F%98%80")).toBe("😀");
+  });
+});
+
+// Byte-wise WHATWG reference: percent-decode to bytes, then UTF-8 decode with
+// replacement. Used only where decodeURIComponent rejects the input.
+function decodeQueryComponentReference(raw: string): string {
+  const bytes: number[] = [];
+  const s = raw.replaceAll("+", " ");
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (
+      c === 37 &&
+      i + 2 < s.length &&
+      /^[0-9a-fA-F]{2}$/.test(s.slice(i + 1, i + 3))
+    ) {
+      bytes.push(Number.parseInt(s.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(...new TextEncoder().encode(s[i]));
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}

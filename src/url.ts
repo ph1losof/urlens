@@ -650,9 +650,17 @@ export function setPathname(rawUrl: string, newPathname: string): string {
   if (qPos !== -1 && qPos < pathEnd) {
     pathEnd = qPos;
   }
-  const hPos = rawUrl.indexOf("#", pathStart);
-  if (hPos !== -1 && hPos < pathEnd) {
-    pathEnd = hPos;
+  // An early query ends the pathname; avoid searching its long tail for '#'.
+  if (
+    rawUrl.length < 256 ||
+    qPos === -1 ||
+    qPos >= 128 ||
+    rawUrl.lastIndexOf("#", qPos) !== -1
+  ) {
+    const hPos = rawUrl.indexOf("#", pathStart);
+    if (hPos !== -1 && hPos < pathEnd) {
+      pathEnd = hPos;
+    }
   }
   if (
     pathEnd - pathStart === normalized.length &&
