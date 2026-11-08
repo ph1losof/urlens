@@ -76,14 +76,14 @@ function parseViewPort(raw: string, start: number, end: number): number {
 class UrlView implements UrlViewType {
   // Erase declarations: the constructor initializes every slot exactly once.
   // _queryEnd is also the fragment boundary, so no separate fragment slot is needed.
-  private declare readonly _raw: string;
-  private declare readonly _queryEnd: number;
-  private declare readonly _schemeEnd: number;
-  private declare readonly _hostStart: number;
-  private declare readonly _hostEnd: number;
-  private declare readonly _portColon: number;
-  private declare readonly _authEnd: number;
-  private declare readonly _queryStart: number;
+  declare private readonly _raw: string;
+  declare private readonly _queryEnd: number;
+  declare private readonly _schemeEnd: number;
+  declare private readonly _hostStart: number;
+  declare private readonly _hostEnd: number;
+  declare private readonly _portColon: number;
+  declare private readonly _authEnd: number;
+  declare private readonly _queryStart: number;
 
   // fallow-ignore-next-line complexity
   constructor(rawUrl: string) {
