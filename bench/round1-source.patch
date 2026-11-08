@@ -1,0 +1,596 @@
+--- a/src/decode.ts
++++ b/src/decode.ts
+@@ -9,6 +9,9 @@
+ // Decodes s[start, end), returning a substring directly when no decoding is needed.
+ // fallow-ignore-next-line complexity
+ export function decodeRange(s: string, start: number, end: number): string {
++  if (end - start >= 64) {
++    return decodeLongRange(s, start, end);
++  }
+   let pct = false;
+   let plus = false;
+   let firstPlus = -1;
+@@ -59,6 +62,30 @@
+   }
+ }
+ 
++// Native string searches avoid a JavaScript iteration per byte for long values.
++// Slice first so searches cannot run into another field or a large fragment.
++function decodeLongRange(s: string, start: number, end: number): string {
++  const raw = s.substring(start, end);
++  const pct = raw.indexOf("%");
++  const plus = raw.indexOf("+");
++  if (pct === -1) {
++    return plus === -1 ? raw : plusToSpace(raw, 0, raw.length, plus);
++  }
++  if (
++    pct + 2 >= raw.length ||
++    hexNibble(raw.charCodeAt(pct + 1)) === -1 ||
++    hexNibble(raw.charCodeAt(pct + 2)) === -1
++  ) {
++    return tolerantDecode(raw, 0, raw.length);
++  }
++  const prepared = plus === -1 ? raw : plusToSpace(raw, 0, raw.length, plus);
++  try {
++    return decodeURIComponent(prepared);
++  } catch {
++    return tolerantDecode(raw, 0, raw.length);
++  }
++}
++
+ // Replaces '+' in s[start, end); firstPlus is the first known match.
+ function plusToSpace(
+   s: string,
+@@ -66,6 +93,9 @@
+   end: number,
+   firstPlus: number
+ ): string {
++  if (end - firstPlus >= 64) {
++    return s.substring(start, end).replaceAll("+", " ");
++  }
+   let out = s.substring(start, firstPlus);
+   let runStart = firstPlus;
+   for (let i = firstPlus; i < end; i++) {
+--- a/src/query-scan.ts
++++ b/src/query-scan.ts
+@@ -153,6 +153,30 @@
+ // Compares s[start, end) with expected using form decoding and WHATWG UTF-8
+ // error handling. Invalid bytes emit U+FFFD; a non-continuation byte after an
+ // invalid lead is processed again.
++// fallow-ignore-next-line complexity
++export function compareQueryValueRange(
++  s: string,
++  start: number,
++  end: number,
++  expected: string
++): boolean {
++  const expectedLen = expected.length;
++  // Form decoding never increases UTF-16 length. At equal lengths only '+'
++  // can change a matching character; a valid percent escape shortens it.
++  if (expectedLen >= 64 && end - start === expectedLen) {
++    if (s.substring(start, end) !== expected) {
++      if (expected.indexOf(" ") === -1) {
++        return false;
++      }
++    } else if (!queryHasEncoding(expected, 0, expectedLen)) {
++      return true;
++    }
++  }
++  return compareDecodedValueRange(s, start, end, expected);
++}
++
++// Keep the scalar walker separate: key matching and short-value comparisons
++// should not carry the native long-value comparison through their hot loop.
+ // fallow-ignore-next-line complexity
+ export function compareDecodedValueRange(
+   s: string,
+@@ -246,12 +270,16 @@
+   keyLen: number
+ ): boolean {
+   let i = queryStart;
++  // -2: unsearched; -1: exhausted. Retain a later '=' across bare fields.
++  let eq = -2;
+   while (i < end) {
+     let amp = raw.indexOf("&", i);
+     if (amp === -1 || amp > end) {
+       amp = end;
+     }
+-    const eq = raw.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = raw.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     if (
+       (keyLen !== 0 || eq === i) &&
+@@ -305,5 +333,5 @@
+     return false;
+   }
+   const valStart = FB_EQ === -1 ? FB_AMP : FB_EQ + 1;
+-  return compareDecodedValueRange(raw, valStart, FB_AMP, expected);
+-}
++  return compareQueryValueRange(raw, valStart, FB_AMP, expected);
++}
+--- a/src/query.ts
++++ b/src/query.ts
+@@ -3,6 +3,7 @@
+ import { CH_AMP, findKeyMatch } from "./internal.js";
+ import {
+   compareDecodedValueRange,
++  compareQueryValueRange,
+   hasQueryParamDecodedFallback,
+   keyIsAmbiguous,
+   queryHasEncoding,
+@@ -60,6 +61,9 @@
+ 
+ // Per-call query-encoding state: -1 unknown, 0 absent, 1 present.
+ let Q_ENC_STATE = -1;
++
++// Field walkers cache the next '=' across bare fields to keep scans linear.
++// Their eq/fallbackEq slots use -2 for unsearched and -1 for no further '='.
+ 
+ // Returns the key index whose decoded name matches this field, or -1.
+ function matchFieldDecodedFallback(
+@@ -179,12 +183,15 @@
+   let remaining = 3;
+   let i = qPos + 1;
+ 
++  let eq = -2;
+   while (i < end && remaining !== 0) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > end) {
+       amp = end;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     const fieldLen = keyEnd - i;
+     const fieldPacked =
+@@ -223,15 +230,18 @@
+   }
+ 
+   let j = qPos + 1;
++  let fallbackEq = -2;
+   while (j < end && remaining !== 0) {
+     let amp = rawUrl.indexOf("&", j);
+     if (amp === -1 || amp > end) {
+       amp = end;
+     }
+-    const eq = rawUrl.indexOf("=", j);
+-    const keyEnd = eq === -1 || eq > amp ? amp : eq;
++    if (fallbackEq !== -1 && fallbackEq < j) {
++      fallbackEq = rawUrl.indexOf("=", j);
++    }
++    const keyEnd = fallbackEq === -1 || fallbackEq > amp ? amp : fallbackEq;
+     const fieldLen = keyEnd - j;
+-    if (fieldLen === 0 && eq !== j) {
++    if (fieldLen === 0 && fallbackEq !== j) {
+       j = amp + 1;
+       continue;
+     }
+@@ -245,7 +255,9 @@
+       compareDecodedValueRange(rawUrl, j, keyEnd, key1);
+     if (match0 || match1) {
+       const value =
+-        eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
++        fallbackEq === -1 || fallbackEq > amp
++          ? ""
++          : decodeRange(rawUrl, fallbackEq + 1, amp);
+       if (match0) {
+         out[0] = value;
+         remaining &= 2;
+@@ -305,12 +317,15 @@
+   // Ambiguous user key: each byte-equal hit must be verified with the WHATWG
+   // walker before being returned.
+   let i = queryStart;
++  let eq = -2;
+   while (i < end) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > end) {
+       amp = end;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+ 
+     if (
+@@ -392,12 +407,15 @@
+   // Pass 1: byte-strict.
+   let remaining = n;
+   let i = qPos + 1;
++  let eq = -2;
+   while (i < end && remaining > 0) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > end) {
+       amp = end;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     const fieldPacked =
+       keyEnd === i
+@@ -434,15 +452,18 @@
+   // encoding (otherwise byte-strict was conclusive).
+   if (remaining > 0 && queryHasEncoding(rawUrl, qPos + 1, end)) {
+     let j = qPos + 1;
++    let fallbackEq = -2;
+     while (j < end && remaining > 0) {
+       let amp = rawUrl.indexOf("&", j);
+       if (amp === -1 || amp > end) {
+         amp = end;
+       }
+-      const eq = rawUrl.indexOf("=", j);
+-      const keyEnd = eq === -1 || eq > amp ? amp : eq;
++      if (fallbackEq !== -1 && fallbackEq < j) {
++        fallbackEq = rawUrl.indexOf("=", j);
++      }
++      const keyEnd = fallbackEq === -1 || fallbackEq > amp ? amp : fallbackEq;
+       const fieldLen = keyEnd - j;
+-      if (fieldLen === 0 && eq !== j) {
++      if (fieldLen === 0 && fallbackEq !== j) {
+         j = amp + 1;
+         continue;
+       }
+@@ -455,7 +476,9 @@
+         }
+         if (compareDecodedValueRange(rawUrl, j, keyEnd, keys[k])) {
+           out[k] =
+-            eq === -1 || eq > amp ? "" : decodeRange(rawUrl, eq + 1, amp);
++            fallbackEq === -1 || fallbackEq > amp
++              ? ""
++              : decodeRange(rawUrl, fallbackEq + 1, amp);
+           keyPacked[k] = -1;
+           remaining--;
+         }
+@@ -532,12 +555,15 @@
+   let matched = false;
+   let i = queryStart;
+ 
++  let eq = -2;
+   while (i < queryEnd) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > queryEnd) {
+       amp = queryEnd;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     const fieldLen = keyEnd - i;
+     let isMatch =
+@@ -576,11 +602,15 @@
+     }
+ 
+     if (isMatch) {
+-      if (!matched && encoded === null && i > queryStart) {
++      if (!matched && i > queryStart) {
+         newQuery =
+           rawUrl.charCodeAt(queryStart) !== CH_AMP
+             ? rawUrl.substring(queryStart, i - 1)
+-            : normalizeQueryPrefix(rawUrl, queryStart, i - 1);
++            : normalizeQueryPrefix(
++                rawUrl,
++                queryStart,
++                encoded === null ? i - 1 : i
++              );
+       }
+       matched = true;
+       if (!replaced && encoded !== null) {
+@@ -590,7 +620,7 @@
+         newQuery += `${encodedKey}=${encoded}`;
+         replaced = true;
+       }
+-    } else if (encoded !== null || matched) {
++    } else if (matched) {
+       if (newQuery.length > 0) {
+         newQuery += "&";
+       }
+@@ -601,6 +631,19 @@
+   }
+ 
+   if (!replaced && encoded !== null) {
++    // No match: reuse the untouched query instead of rebuilding every field.
++    // Preserve the setters' normalization of leading and final empty fields.
++    if (!matched) {
++      newQuery =
++        rawUrl.charCodeAt(queryStart) === CH_AMP
++          ? normalizeQueryPrefix(rawUrl, queryStart, queryEnd)
++          : rawUrl.substring(
++              queryStart,
++              rawUrl.charCodeAt(queryEnd - 1) === CH_AMP
++                ? queryEnd - 1
++                : queryEnd
++            );
++    }
+     if (newQuery.length > 0) {
+       newQuery += "&";
+     }
+@@ -695,12 +738,15 @@
+   let i = queryStart;
+   Q_ENC_STATE = -1;
+ 
++  let eq = -2;
+   while (i < queryEnd) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > queryEnd) {
+       amp = queryEnd;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     const fieldLen = keyEnd - i;
+     const fieldPacked =
+@@ -844,12 +890,15 @@
+   let i = queryStart;
+   Q_ENC_STATE = -1;
+ 
++  let eq = -2;
+   while (i < queryEnd) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > queryEnd) {
+       amp = queryEnd;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     const fieldLen = keyEnd - i;
+     const fieldPacked =
+@@ -959,12 +1008,15 @@
+   // Ambiguous user key: each byte-equal hit must round-trip through the
+   // WHATWG walker before being accepted.
+   let i = queryStart;
++  let eq = -2;
+   while (i < fragmentStart) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > fragmentStart) {
+       amp = fragmentStart;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     if (
+       keyEnd - i === keyLen &&
+@@ -1029,7 +1081,7 @@
+       if (amp === -1 || amp > fragmentStart) {
+         amp = fragmentStart;
+       }
+-      return compareDecodedValueRange(rawUrl, after + 1, amp, expected);
++      return compareQueryValueRange(rawUrl, after + 1, amp, expected);
+     }
+     if (!queryHasEncoding(rawUrl, queryStart, fragmentStart)) {
+       return false;
+@@ -1046,12 +1098,15 @@
+ 
+   // Ambiguous user key: each byte-equal hit verified via the WHATWG walker.
+   let i = queryStart;
++  let eq = -2;
+   while (i < fragmentStart) {
+     let amp = rawUrl.indexOf("&", i);
+     if (amp === -1 || amp > fragmentStart) {
+       amp = fragmentStart;
+     }
+-    const eq = rawUrl.indexOf("=", i);
++    if (eq !== -1 && eq < i) {
++      eq = rawUrl.indexOf("=", i);
++    }
+     const keyEnd = eq === -1 || eq > amp ? amp : eq;
+     if (
+       keyEnd - i === keyLen &&
+@@ -1060,7 +1115,7 @@
+       compareDecodedValueRange(rawUrl, i, keyEnd, key)
+     ) {
+       const valStart = eq === -1 || eq > amp ? amp : eq + 1;
+-      return compareDecodedValueRange(rawUrl, valStart, amp, expected);
++      return compareQueryValueRange(rawUrl, valStart, amp, expected);
+     }
+     i = amp + 1;
+   }
+--- a/src/view.ts
++++ b/src/view.ts
+@@ -11,6 +11,7 @@
+ } from "./internal.js";
+ import {
+   compareDecodedValueRange,
++  compareQueryValueRange,
+   hasQueryParamDecodedFallback,
+   keyIsAmbiguous,
+   queryHasEncoding,
+@@ -22,6 +23,9 @@
+ interface QueryEncodingCache {
+   _queryEncoding?: boolean;
+ }
++
++// Query walkers retain the next '=' across bare fields instead of searching
++// the same suffix repeatedly. -2 means unsearched, -1 means no further '='.
+ 
+ function hasCachedQueryEncoding(
+   owner: object,
+@@ -36,40 +40,6 @@
+     cache._queryEncoding = hasEncoding;
+   }
+   return hasEncoding;
+-}
+-
+-function queryParamAfterBareField(
+-  raw: string,
+-  start: number,
+-  end: number,
+-  key: string,
+-  keyLen: number,
+-  nextEq: number
+-): string | null {
+-  let i = start;
+-  while (i < end) {
+-    let amp = raw.indexOf("&", i);
+-    if (amp === -1 || amp > end) {
+-      amp = end;
+-    }
+-    const keyEnd = nextEq === -1 || nextEq > amp ? amp : nextEq;
+-    if (
+-      keyEnd - i === keyLen &&
+-      (keyLen !== 0 || nextEq === i) &&
+-      raw.startsWith(key, i) &&
+-      compareDecodedValueRange(raw, i, keyEnd, key)
+-    ) {
+-      return nextEq === -1 || nextEq > amp
+-        ? ""
+-        : decodeRange(raw, nextEq + 1, amp);
+-    }
+-    const next = amp + 1;
+-    if (nextEq !== -1 && nextEq < amp) {
+-      nextEq = next < end ? raw.indexOf("=", next) : -1;
+-    }
+-    i = next;
+-  }
+-  return null;
+ }
+ 
+ function parseViewPort(raw: string, start: number, end: number): number {
+@@ -330,12 +300,15 @@
+ 
+     // Ambiguous user key: verify each byte-equal hit with the WHATWG walker.
+     let i = queryStart;
++    let eq = -2;
+     while (i < end) {
+       let amp = raw.indexOf("&", i);
+       if (amp === -1 || amp > end) {
+         amp = end;
+       }
+-      const eq = raw.indexOf("=", i);
++      if (eq !== -1 && eq < i) {
++        eq = raw.indexOf("=", i);
++      }
+       const keyEnd = eq === -1 || eq > amp ? amp : eq;
+       if (
+         keyEnd - i === keyLen &&
+@@ -348,15 +321,7 @@
+         }
+         return decodeRange(raw, eq + 1, amp);
+       }
+-      const next = amp + 1;
+-      if ((eq === -1 || eq > amp) && next < end) {
+-        const value = queryParamAfterBareField(raw, next, end, key, keyLen, eq);
+-        if (value !== null) {
+-          return value;
+-        }
+-        break;
+-      }
+-      i = next;
++      i = amp + 1;
+     }
+     const cache = this as unknown as QueryEncodingCache;
+     let hasEncoding = cache._queryEncoding;
+@@ -456,12 +421,15 @@
+     // Pass 1: byte-strict, with verification for ambiguous keys.
+     let remaining = n;
+     let i = this._queryStart + 1;
++    let eq = -2;
+     while (i < end && remaining > 0) {
+       let amp = raw.indexOf("&", i);
+       if (amp === -1 || amp > end) {
+         amp = end;
+       }
+-      const eq = raw.indexOf("=", i);
++      if (eq !== -1 && eq < i) {
++        eq = raw.indexOf("=", i);
++      }
+       const keyEnd = eq === -1 || eq > amp ? amp : eq;
+       const fieldPacked =
+         keyEnd === i
+@@ -499,15 +467,18 @@
+       hasCachedQueryEncoding(this, raw, this._queryStart + 1, end)
+     ) {
+       let j = this._queryStart + 1;
++      let fallbackEq = -2;
+       while (j < end && remaining > 0) {
+         let amp = raw.indexOf("&", j);
+         if (amp === -1 || amp > end) {
+           amp = end;
+         }
+-        const eq = raw.indexOf("=", j);
+-        const keyEnd = eq === -1 || eq > amp ? amp : eq;
++        if (fallbackEq !== -1 && fallbackEq < j) {
++          fallbackEq = raw.indexOf("=", j);
++        }
++        const keyEnd = fallbackEq === -1 || fallbackEq > amp ? amp : fallbackEq;
+         const fieldLen = keyEnd - j;
+-        if (fieldLen === 0 && eq !== j) {
++        if (fieldLen === 0 && fallbackEq !== j) {
+           j = amp + 1;
+           continue;
+         }
+@@ -520,7 +491,9 @@
+           }
+           if (compareDecodedValueRange(raw, j, keyEnd, keys[k])) {
+             (out as Record<string, string | null>)[keys[k]] =
+-              eq === -1 || eq > amp ? "" : decodeRange(raw, eq + 1, amp);
++              fallbackEq === -1 || fallbackEq > amp
++                ? ""
++                : decodeRange(raw, fallbackEq + 1, amp);
+             keyPacked[k] = -1;
+             remaining--;
+           }
+@@ -554,12 +527,15 @@
+     }
+ 
+     let i = queryStart;
++    let eq = -2;
+     while (i < end) {
+       let amp = raw.indexOf("&", i);
+       if (amp === -1 || amp > end) {
+         amp = end;
+       }
+-      const eq = raw.indexOf("=", i);
++      if (eq !== -1 && eq < i) {
++        eq = raw.indexOf("=", i);
++      }
+       const keyEnd = eq === -1 || eq > amp ? amp : eq;
+       if (
+         keyEnd - i === keyLen &&
+@@ -604,7 +580,7 @@
+         if (amp === -1 || amp > end) {
+           amp = end;
+         }
+-        return compareDecodedValueRange(raw, after + 1, amp, expected);
++        return compareQueryValueRange(raw, after + 1, amp, expected);
+       }
+       if (!hasCachedQueryEncoding(this, raw, queryStart, end)) {
+         return false;
+@@ -620,12 +596,15 @@
+     }
+ 
+     let i = queryStart;
++    let eq = -2;
+     while (i < end) {
+       let amp = raw.indexOf("&", i);
+       if (amp === -1 || amp > end) {
+         amp = end;
+       }
+-      const eq = raw.indexOf("=", i);
++      if (eq !== -1 && eq < i) {
++        eq = raw.indexOf("=", i);
++      }
+       const keyEnd = eq === -1 || eq > amp ? amp : eq;
+       if (
+         keyEnd - i === keyLen &&
+@@ -634,7 +613,7 @@
+         compareDecodedValueRange(raw, i, keyEnd, key)
+       ) {
+         const valStart = eq === -1 || eq > amp ? amp : eq + 1;
+-        return compareDecodedValueRange(raw, valStart, amp, expected);
++        return compareQueryValueRange(raw, valStart, amp, expected);
+       }
+       i = amp + 1;
+     }

@@ -9,6 +9,9 @@ let DECODE_BYTES = new Uint8Array(64);
 // Decodes s[start, end), returning a substring directly when no decoding is needed.
 // fallow-ignore-next-line complexity
 export function decodeRange(s: string, start: number, end: number): string {
+  if (end - start >= 64) {
+    return decodeLongRange(s, start, end);
+  }
   let pct = false;
   let plus = false;
   let firstPlus = -1;
@@ -59,6 +62,30 @@ export function decodeRange(s: string, start: number, end: number): string {
   }
 }
 
+// Native string searches avoid a JavaScript iteration per byte for long values.
+// Slice first so searches cannot run into another field or a large fragment.
+function decodeLongRange(s: string, start: number, end: number): string {
+  const raw = s.substring(start, end);
+  const pct = raw.indexOf("%");
+  const plus = raw.indexOf("+");
+  if (pct === -1) {
+    return plus === -1 ? raw : plusToSpace(raw, 0, raw.length, plus);
+  }
+  if (
+    pct + 2 >= raw.length ||
+    hexNibble(raw.charCodeAt(pct + 1)) === -1 ||
+    hexNibble(raw.charCodeAt(pct + 2)) === -1
+  ) {
+    return tolerantDecode(raw, 0, raw.length);
+  }
+  const prepared = plus === -1 ? raw : plusToSpace(raw, 0, raw.length, plus);
+  try {
+    return decodeURIComponent(prepared);
+  } catch {
+    return tolerantDecode(raw, 0, raw.length);
+  }
+}
+
 // Replaces '+' in s[start, end); firstPlus is the first known match.
 function plusToSpace(
   s: string,
@@ -66,6 +93,9 @@ function plusToSpace(
   end: number,
   firstPlus: number
 ): string {
+  if (end - firstPlus >= 64) {
+    return s.substring(start, end).replaceAll("+", " ");
+  }
   let out = s.substring(start, firstPlus);
   let runStart = firstPlus;
   for (let i = firstPlus; i < end; i++) {

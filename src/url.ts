@@ -90,9 +90,18 @@ function locatePathnameRange(rawUrl: string): void {
     if (qPos !== -1) {
       pathEnd = qPos;
     }
-    const hPos = rawUrl.indexOf("#", authorityStart);
-    if (hPos !== -1 && hPos < pathEnd) {
-      pathEnd = hPos;
+    // For an early query in a long URL, probe only the short prefix for a hash.
+    // Keep native forward search for short URLs and long paths.
+    if (
+      rawUrl.length < 256 ||
+      qPos === -1 ||
+      qPos >= 128 ||
+      rawUrl.lastIndexOf("#", qPos) !== -1
+    ) {
+      const hPos = rawUrl.indexOf("#", authorityStart);
+      if (hPos !== -1 && hPos < pathEnd) {
+        pathEnd = hPos;
+      }
     }
     if (slash === -1 || slash >= pathEnd) {
       PATH_S = pathEnd;
@@ -110,9 +119,16 @@ function locatePathnameRange(rawUrl: string): void {
   if (qPos !== -1 && qPos < pathEnd) {
     pathEnd = qPos;
   }
-  const hPos = rawUrl.indexOf("#", pathStart);
-  if (hPos !== -1 && hPos < pathEnd) {
-    pathEnd = hPos;
+  if (
+    rawUrl.length < 256 ||
+    qPos === -1 ||
+    qPos >= 128 ||
+    rawUrl.lastIndexOf("#", qPos) !== -1
+  ) {
+    const hPos = rawUrl.indexOf("#", pathStart);
+    if (hPos !== -1 && hPos < pathEnd) {
+      pathEnd = hPos;
+    }
   }
   PATH_S = pathStart;
   PATH_E = pathEnd;
@@ -143,9 +159,16 @@ export function readPathname(rawUrl: string): string {
     if (qPos !== -1) {
       end = qPos;
     }
-    const hPos = rawUrl.indexOf("#", authorityStart);
-    if (hPos !== -1 && hPos < end) {
-      end = hPos;
+    if (
+      rawUrl.length < 256 ||
+      qPos === -1 ||
+      qPos >= 128 ||
+      rawUrl.lastIndexOf("#", qPos) !== -1
+    ) {
+      const hPos = rawUrl.indexOf("#", authorityStart);
+      if (hPos !== -1 && hPos < end) {
+        end = hPos;
+      }
     }
     if (slash === -1 || slash >= end) {
       return "/";
@@ -159,9 +182,16 @@ export function readPathname(rawUrl: string): string {
   if (qPos !== -1 && qPos < end) {
     end = qPos;
   }
-  const hPos = rawUrl.indexOf("#", start);
-  if (hPos !== -1 && hPos < end) {
-    end = hPos;
+  if (
+    rawUrl.length < 256 ||
+    qPos === -1 ||
+    qPos >= 128 ||
+    rawUrl.lastIndexOf("#", qPos) !== -1
+  ) {
+    const hPos = rawUrl.indexOf("#", start);
+    if (hPos !== -1 && hPos < end) {
+      end = hPos;
+    }
   }
   return end === start ? "/" : rawUrl.substring(start, end);
 }
@@ -296,6 +326,16 @@ export function readPort(rawUrl: string): number | null {
   if (portStart >= authorityEnd) {
     return null;
   }
+  if (authorityEnd - portStart === 4) {
+    const d0 = rawUrl.charCodeAt(portStart) - 48;
+    const d1 = rawUrl.charCodeAt(portStart + 1) - 48;
+    const d2 = rawUrl.charCodeAt(portStart + 2) - 48;
+    const d3 = rawUrl.charCodeAt(portStart + 3) - 48;
+    if (d0 >>> 0 > 9 || d1 >>> 0 > 9 || d2 >>> 0 > 9 || d3 >>> 0 > 9) {
+      return null;
+    }
+    return ((d0 * 10 + d1) * 10 + d2) * 10 + d3;
+  }
   let port = 0;
   for (let i = portStart; i < authorityEnd; i++) {
     const c = rawUrl.charCodeAt(i);
@@ -322,15 +362,10 @@ export function hasScheme(rawUrl: string, scheme: string): boolean {
     return false;
   }
   for (let i = 0; i < schemePos; i++) {
-    let actual = rawUrl.charCodeAt(i);
-    let expected = scheme.charCodeAt(i);
-    if (actual >= 65 && actual <= 90) {
-      actual += 32;
-    }
-    if (expected >= 65 && expected <= 90) {
-      expected += 32;
-    }
-    if (actual !== expected) {
+    // The actual scheme is already validated. Exclude controls in the
+    // expected value: OR 32 would map some of them to valid digits or +/-.
+    const expected = scheme.charCodeAt(i);
+    if (expected < 32 || (rawUrl.charCodeAt(i) | 32) !== (expected | 32)) {
       return false;
     }
   }

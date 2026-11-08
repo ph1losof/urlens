@@ -13,7 +13,7 @@ validation, relative URL resolution, or normalization. Use `urlens` for repeated
 work on the resulting string, or for request paths such as
 `/search?q=hello+world`.
 
-On the current cross-engine benchmark, `urlens` reads a plain query parameter
+In the published cross-engine benchmark, `urlens` reads a plain query parameter
 **16.9-24.7x faster**, checks parameter presence **33.4-41.9x faster**, and reads
 pathnames **9.0-40.2x faster** than the equivalent `URL` or `URLSearchParams`
 work. It has no runtime dependencies, and a tree-shaken `readPathname` import is
@@ -48,7 +48,7 @@ setQueryParam(url, "page", "2");
 - Query lookup uses byte-level fast paths and pays for form decoding only when the
   key or query requires it.
 - Batched query APIs scan fields once rather than repeating a complete lookup.
-- Predicates compare in place without creating the value they test.
+- Predicates compare without constructing the decoded value they test.
 - Immutable setters preserve untouched URL slices and return the original string
   when nothing changes.
 - `view(url)` caches component boundaries so repeated reads can amortize one setup
@@ -57,7 +57,7 @@ setQueryParam(url, "page", "2");
 ## Allocation And Size
 
 The API is designed to avoid parsing an entire URL or constructing component
-objects for small operations. Predicates avoid materializing a result string,
+objects for small operations. Predicates avoid materializing a decoded value,
 readers produce only the requested value, and unchanged setters can return the
 original input. Exact string allocation is engine- and workload-dependent.
 
@@ -65,11 +65,11 @@ Local Bun bundler estimates, minified and gzip-compressed:
 
 | Import | Estimated gzip size |
 |---|---:|
-| Full API | about 7.9 KB |
+| Full API | about 8.2 KB |
 | `readPathname` | about 0.45 KB |
-| `readQueryParam` | about 1.8 KB |
-| `queryParamEquals` | about 1.3 KB |
-| `view` | about 3.5 KB |
+| `readQueryParam` | about 2.0 KB |
+| `queryParamEquals` | about 1.5 KB |
+| `view` | about 3.6 KB |
 | `encodeQueryComponent` | about 0.5 KB |
 
 Named ESM imports are tree-shakeable, the package declares `sideEffects: false`,
@@ -131,6 +131,9 @@ Run `bun run bench` to reproduce the suite, `bun run bench:update-readme` to
 regenerate the marked block, or
 `URLENS_BENCH_BASELINE=/path/to/baseline bun run bench:ab` for paired
 baseline/candidate profiling in one browser process.
+
+See [performance analysis](bench/PERFORMANCE.md) for the query and component changes,
+paired before/after measurements, validation, and reproduction instructions.
 
 ## Runtime Requirements
 

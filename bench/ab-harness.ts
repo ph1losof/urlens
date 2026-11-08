@@ -5,10 +5,18 @@ import * as candidateModule from "urlens-candidate";
 import type { view } from "../src/index.js";
 
 interface Api {
+  decodeQueryComponent(value: string): string;
+  encodeQueryComponent(value: string): string;
   hasQueryParam(url: string, key: string): boolean;
+  hasScheme(url: string, scheme: string): boolean;
   queryParamEquals(url: string, key: string, expected: string): boolean;
   rawOriginsEqual(a: string, b: string): boolean;
   readPathname(url: string): string;
+  pathnameStartsWith(url: string, prefix: string): boolean;
+  pathnameEndsWith(url: string, suffix: string): boolean;
+  readOrigin(url: string): string;
+  readHost(url: string): string;
+  readHostname(url: string): string;
   readPort(url: string): number | null;
   readQueryParam(url: string, key: string): string | null;
   readQueryParams(
@@ -16,7 +24,11 @@ interface Api {
     keys: readonly string[]
   ): readonly (string | null)[];
   setPathname(url: string, pathname: string): string;
+  setPort(url: string, port: number | null): string;
   setScheme(url: string, scheme: string): string;
+  setQueryParam(url: string, key: string, value: string | null): string;
+  setQueryParams(url: string, params: Record<string, string | null>): string;
+  removeQueryParams(url: string, keys: readonly string[]): string;
   view: typeof view;
 }
 type BenchFn = () => void;
@@ -45,15 +57,27 @@ function normalizeApi(module: object): Api {
     throw new Error("origin comparison export is missing");
   }
   return {
+    decodeQueryComponent: source.decodeQueryComponent,
+    encodeQueryComponent: source.encodeQueryComponent,
     hasQueryParam: source.hasQueryParam,
+    hasScheme: source.hasScheme,
     queryParamEquals: source.queryParamEquals,
     rawOriginsEqual,
     readPathname: source.readPathname,
+    pathnameStartsWith: source.pathnameStartsWith,
+    pathnameEndsWith: source.pathnameEndsWith,
+    readOrigin: source.readOrigin,
+    readHost: source.readHost,
+    readHostname: source.readHostname,
     readPort: source.readPort,
     readQueryParam: source.readQueryParam,
     readQueryParams: source.readQueryParams,
     setPathname: source.setPathname,
+    setPort: source.setPort,
     setScheme: source.setScheme,
+    setQueryParam: source.setQueryParam,
+    setQueryParams: source.setQueryParams,
+    removeQueryParams: source.removeQueryParams,
     view: source.view,
   };
 }
@@ -66,6 +90,7 @@ const candidate = normalizeApi(
 );
 const budget = benchGlobals.URLENS_BENCH_BUDGET ?? 300;
 const filter = benchGlobals.URLENS_BENCH_FILTER ?? "";
+const filters = filter.split(",").filter(Boolean);
 const rounds = benchGlobals.URLENS_BENCH_ROUNDS ?? 7;
 const cases: BenchCase[] = [];
 
@@ -420,26 +445,395 @@ add("flat.origins", baselineFlat.origins, candidateFlat.origins);
 add("flat.set.pathname", baselineFlat.setPathname, candidateFlat.setPathname);
 add("flat.set.scheme", baselineFlat.setScheme, candidateFlat.setScheme);
 
-function warm(fn: BenchFn, duration: number): void {
+// Exercise sizes and shapes that the short, ordinary URL cases do not cover.
+// Inputs are built outside timed loops and results escape to prevent folding.
+function scalingCases(api: Api): Record<string, BenchFn> {
+  const plain = FULL_URLS.map((_, i) => `${"token".repeat(800)}${i}`);
+  const plus = plain.map((value) => `${value}+tail`);
+  const encoded = plain.map((value) => `${value}%C3%A9`);
+  const urls = plain.map((value) => `https://x.test/?q=${value}&other=1#end`);
+  const invalid = FULL_URLS.map((_, i) => `%E2%82+%FF%41%ZZ${i}`);
+  const escaped = new Array<unknown>(4096);
+  const result: Record<string, BenchFn> = {};
+  for (const [name, values] of Object.entries({
+    plain,
+    plus,
+    encoded,
+    invalid,
+  })) {
+    result[`decode.${name}`] = () => {
+      const value = api.decodeQueryComponent(next(values));
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  result["read.long"] = () => {
+    const value = api.readQueryParam(next(urls), "q");
+    escaped[position & 4095] = value;
+    sink = (sink + (value?.length ?? 0)) | 0;
+  };
+  result["equals.long"] = () => {
+    const index = position & 7;
+    sink =
+      (sink + (api.queryParamEquals(next(urls), "q", plain[index]) ? 1 : 0)) |
+      0;
+  };
+  for (const count of [128, 1024, 8192]) {
+    const bare = FULL_URLS.map(
+      (_, i) => `/?${"flag&".repeat(count)}last=${i}#end`
+    );
+    const retained = bare.map((url) => api.view(url));
+    result[`bare${count}.batch`] = () => {
+      const value = api.readQueryParams(next(bare), [
+        "last",
+        "missing",
+        "other",
+      ]);
+      escaped[position & 4095] = value;
+      sink = (sink + (value[0]?.length ?? 0)) | 0;
+    };
+    result[`bare${count}.view`] = () => {
+      const value = next(retained).queryParams(["last", "missing", "other"]);
+      escaped[position & 4095] = value;
+      sink = (sink + (value.last?.length ?? 0)) | 0;
+    };
+    result[`bare${count}.set`] = () => {
+      const value = api.setQueryParam(next(bare), "last", "updated");
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+    result[`bare${count}.remove`] = () => {
+      const value = api.removeQueryParams(next(bare), ["last", "other"]);
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  result["set.short"] = () => {
+    const value = api.setQueryParam(next(QUERY_URLS), "q", "updated");
+    escaped[position & 4095] = value;
+    sink = (sink + value.length) | 0;
+  };
+  result["set.late"] = () => {
+    const value = api.setQueryParam(next(QUERY_URLS), "lang", "updated");
+    escaped[position & 4095] = value;
+    sink = (sink + value.length) | 0;
+  };
+  result["set.append"] = () => {
+    const value = api.setQueryParam(next(QUERY_URLS), "added", "new");
+    escaped[position & 4095] = value;
+    sink = (sink + value.length) | 0;
+  };
+  result["set.batch"] = () => {
+    const value = api.setQueryParams(next(QUERY_URLS), {
+      q: "updated",
+      lang: null,
+    });
+    escaped[position & 4095] = value;
+    sink = (sink + value.length) | 0;
+  };
+  return result;
+}
+
+const baselineScaling = scalingCases(baseline);
+const candidateScaling = scalingCases(candidate);
+for (const name of Object.keys(baselineScaling)) {
+  add(`scale.${name}`, baselineScaling[name], candidateScaling[name]);
+}
+
+function additionalCases(api: Api): Record<string, BenchFn> {
+  const {
+    encodeQueryComponent,
+    readQueryParam,
+    readPathname,
+    queryParamEquals,
+    hasQueryParam,
+    setQueryParam,
+  } = api;
+  const escaped = new Array<unknown>(4096);
+  const result: Record<string, BenchFn> = {};
+  const plain = FULL_URLS.map((_, i) => `${"token".repeat(800)}${i}`);
+  for (const [name, values] of Object.entries({
+    short: [
+      "alpha",
+      "bravo",
+      "charlie",
+      "delta",
+      "echo",
+      "foxtrot",
+      "golf",
+      "hotel",
+    ],
+    shortMixed: [
+      "",
+      "hello world",
+      "AZ09_-.*",
+      "a&b=1",
+      "café",
+      "🌟",
+      "\uD800",
+      "()!'~",
+    ],
+    plain,
+    space: plain.map((value) => `${value} tail`),
+    utf8: plain.map((value) => `${value} café ☕`),
+    surrogate: plain.map((value) => `${value}\uD800`),
+    dense: FULL_URLS.map((_, i) => `${"é ☕".repeat(512)}${i}`),
+  })) {
+    result[`encode.${name}`] = () => {
+      const value = encodeQueryComponent(next(values));
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  for (const size of [32, 4096]) {
+    for (const hit of [true, false]) {
+      const urls = FULL_URLS.map(
+        (_, i) =>
+          `https://x.test/?q=${"a".repeat(size)}${i}&${hit ? "a" : "z"}=value`
+      );
+      result[`collision.${size}.${hit ? "hit" : "miss"}`] = () => {
+        const value = readQueryParam(next(urls), "a");
+        sink = (sink + (value?.length ?? 0)) | 0;
+      };
+    }
+  }
+  const encodedValues = FULL_URLS.map(
+    (_, i) =>
+      `https://x.test/?q=hello+world+${i}&message=caf%C3%A9&value=%E2%98%95`
+  );
+  const fields = Array.from({ length: 128 }, (_, i) => `p${i}=value`).join("&");
+  const removalUrls = FULL_URLS.map(
+    (_, i) => `https://x.test/?${fields}&last=${i}#end`
+  );
+  for (const count of [16, 32, 64, 256]) {
+    const keys = Array.from({ length: count }, (_, i) => `p${i * 2}`);
+    result[`remove.${count}`] = () => {
+      const value = api.removeQueryParams(next(removalUrls), keys);
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+    if (count > 32) {
+      result[`remove.short.${count}`] = () => {
+        const value = api.removeQueryParams(next(QUERY_URLS), keys);
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+      const longValues = plain.map((value) => `/?q=${value}#end`);
+      result[`remove.value.${count}`] = () => {
+        const value = api.removeQueryParams(next(longValues), keys);
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+      const params = Object.fromEntries(keys.map((key) => [key, "updated"]));
+      result[`set.batch.${count}`] = () => {
+        const value = api.setQueryParams(next(removalUrls), params);
+        escaped[position & 4095] = value;
+        sink = (sink + value.length) | 0;
+      };
+    }
+  }
+  const retained = encodedValues.map((url) => api.view(url));
+  result["encodedValues.miss"] = () => {
+    sink =
+      (sink + (readQueryParam(next(encodedValues), "missing")?.length ?? 0)) |
+      0;
+  };
+  result["encodedValues.retain"] = () => {
+    sink = (sink + (next(retained).queryParam("missing")?.length ?? 0)) | 0;
+  };
+  const mixed = [
+    "https://x.test/api?q=alpha&utm_source=one&lang=en",
+    "http://x.test/api?q=bravo&utm_source=two&lang=fr",
+    "HTTPS://x.test/api?q=charlie&utm_source=three&lang=de",
+    "ftp://x.test/api?q=delta&utm_source=four&lang=es",
+    "ws://x.test/api?q=echo&utm_source=five&lang=it",
+    "custom+1://x.test/api?q=foxtrot&utm_source=six&lang=pt",
+    "/api?q=golf&utm_source=seven&lang=nl",
+    "relative/api?q=hotel&utm_source=eight&lang=sv",
+  ];
+  result["mixed.request"] = () => {
+    const url = next(mixed);
+    sink =
+      (sink +
+        readPathname(url).length +
+        (readQueryParam(url, "q")?.length ?? 0) +
+        (hasQueryParam(url, "utm_source") ? 1 : 0) +
+        (queryParamEquals(url, "lang", "en") ? 1 : 0)) |
+      0;
+  };
+  result["mixed.rewrite"] = () => {
+    const value = setQueryParam(next(mixed), "utm_source", "updated");
+    escaped[position & 4095] = value;
+    sink = (sink + value.length) | 0;
+  };
+  return result;
+}
+
+const baselineAdditional = additionalCases(baseline);
+const candidateAdditional = additionalCases(candidate);
+for (const name of Object.keys(baselineAdditional)) {
+  add(`extra.${name}`, baselineAdditional[name], candidateAdditional[name]);
+}
+
+function otherAreaCases(api: Api): Record<string, BenchFn> {
+  const {
+    readOrigin,
+    readHost,
+    readHostname,
+    readPort,
+    readPathname,
+    setPort,
+    encodeQueryComponent,
+    view,
+  } = api;
+  const escaped = new Array<unknown>(4096);
+  const result: Record<string, BenchFn> = {};
+  const hosts = FULL_URLS.map(
+    (_, i) =>
+      `https://${"a".repeat(55)}.${"b".repeat(55)}.${"c".repeat(55)}.example${i}.test:8443/path?q=value#end`
+  );
+  const tails = FULL_URLS.map(
+    (_, i) => `https://example${i}.test/api?q=${"payload".repeat(1000)}`
+  );
+  for (const [shape, urls] of Object.entries({
+    short: FULL_URLS,
+    complex: COMPLEX_URLS,
+    longHost: hosts,
+    longTail: tails,
+  })) {
+    result[`${shape}.origin`] = () => {
+      sink = (sink + readOrigin(next(urls)).length) | 0;
+    };
+    result[`${shape}.host`] = () => {
+      sink = (sink + readHost(next(urls)).length) | 0;
+    };
+    result[`${shape}.hostname`] = () => {
+      sink = (sink + readHostname(next(urls)).length) | 0;
+    };
+    result[`${shape}.port`] = () => {
+      sink = (sink + (readPort(next(urls)) ?? 0)) | 0;
+    };
+    result[`${shape}.path`] = () => {
+      sink = (sink + readPathname(next(urls)).length) | 0;
+    };
+    result[`${shape}.setPort`] = () => {
+      const value = setPort(next(urls), 8080);
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+    result[`${shape}.construct`] = () => {
+      const value = view(next(urls));
+      escaped[position & 4095] = value;
+      sink = (sink + value.toString().length) | 0;
+    };
+    result[`${shape}.read5`] = () => {
+      const value = view(next(urls));
+      sink =
+        (sink +
+          value.scheme().length +
+          value.host().length +
+          (value.port() ?? 0) +
+          value.pathname().length +
+          value.fragment().length) |
+        0;
+    };
+  }
+  for (const [shape, urls] of Object.entries({
+    longPath: FULL_URLS.map(
+      (_, i) => `https://x.test/${"segment/".repeat(1000)}${i}?q=1`
+    ),
+    noPath: FULL_URLS.map(
+      (_, i) => `https://x.test?q=${"value".repeat(1400)}${i}`
+    ),
+    relative: FULL_URLS.map((_, i) => `/api?q=${"value".repeat(1400)}${i}`),
+    longTail: tails,
+  })) {
+    result[`path.${shape}`] = () => {
+      sink = (sink + readPathname(next(urls)).length) | 0;
+    };
+    result[`pathPredicates.${shape}`] = () => {
+      const url = next(urls);
+      sink =
+        (sink +
+          (api.pathnameStartsWith(url, "/api") ? 1 : 0) +
+          (api.pathnameEndsWith(url, "api") ? 1 : 0)) |
+        0;
+    };
+  }
+  for (const [name, ports] of Object.entries({
+    two: ["80", "21", "00", "99"],
+    three: ["443", "123", "000", "999"],
+    four: ["8080", "8443", "3000", "0000"],
+    five: ["65535", "12345", "00000", "99999"],
+    invalid: ["8a80", "+443", "-123", "１２３４"],
+  })) {
+    const urls = FULL_URLS.map(
+      (_, i) => `https://example.test:${ports[i & 3]}/api?q=1`
+    );
+    result[`port.${name}`] = () => {
+      sink = (sink + (readPort(next(urls)) ?? 0)) | 0;
+    };
+  }
+  for (const [name, urls, scheme] of [
+    ["exact", FULL_URLS, "https"],
+    ["fold", FULL_URLS.map((url) => url.replace("https:", "HTTPS:")), "https"],
+    ["miss", FULL_URLS, "other"],
+    ["lengthMiss", FULL_URLS, "ws"],
+    [
+      "long",
+      FULL_URLS.map((url) => url.replace("https:", "custom+extension:")),
+      "custom+extension",
+    ],
+  ] as const) {
+    result[`scheme.${name}`] = () => {
+      sink = (sink + (api.hasScheme(next(urls), scheme) ? 1 : 0)) | 0;
+    };
+  }
+  for (const [name, text] of Object.entries({
+    latin1: "éàüñ",
+    cyrillic: "Привет",
+    cjk: "中文日本語",
+    astral: "🌟😀",
+    latin1Short: "café",
+  })) {
+    const values = FULL_URLS.map(
+      (_, i) => `${name === "latin1Short" ? text : text.repeat(128)}${i}`
+    );
+    result[`encode.${name}`] = () => {
+      const value = encodeQueryComponent(next(values));
+      escaped[position & 4095] = value;
+      sink = (sink + value.length) | 0;
+    };
+  }
+  return result;
+}
+
+const baselineOtherAreas = otherAreaCases(baseline);
+const candidateOtherAreas = otherAreaCases(candidate);
+for (const name of Object.keys(baselineOtherAreas)) {
+  add(`area.${name}`, baselineOtherAreas[name], candidateOtherAreas[name]);
+}
+
+function warm(fn: BenchFn, duration: number, batchSize: number): void {
   position = 0;
   const warmEnd = performance.now() + duration;
   while (performance.now() < warmEnd) {
-    for (let i = 0; i < 1024; i++) {
+    for (let i = 0; i < batchSize; i++) {
       fn();
     }
   }
 }
 
-function runFor(fn: BenchFn, duration: number): number {
+function runFor(fn: BenchFn, duration: number, batchSize: number): number {
   position = 0;
   const start = performance.now();
   const end = start + duration;
   let operations = 0;
   while (performance.now() < end) {
-    for (let i = 0; i < 1024; i++) {
+    for (let i = 0; i < batchSize; i++) {
       fn();
     }
-    operations += 1024;
+    operations += batchSize;
   }
   return (operations * 1000) / (performance.now() - start);
 }
@@ -453,11 +847,14 @@ function median(values: number[]): number {
 }
 
 function formatRate(value: number): string {
+  if (value < 1_000_000) {
+    return `${(value / 1000).toFixed(2)}K/s`;
+  }
   return `${(value / 1_000_000).toFixed(2)}M/s`;
 }
 
 function pad(value: string, width: number): string {
-  return value.padEnd(width);
+  return `${value.padEnd(width)} `;
 }
 
 function output(message: string): void {
@@ -479,23 +876,27 @@ output(`budget=${budget}ms rounds=${rounds}`);
 output(`${pad("case", 28)}${pad("baseline", 13)}${pad("candidate", 13)}delta`);
 
 for (const benchCase of cases) {
-  if (filter && !benchCase.name.startsWith(filter)) {
+  if (
+    filters.length > 0 &&
+    !filters.some((prefix) => benchCase.name.startsWith(prefix))
+  ) {
     continue;
   }
   const baselineRates: number[] = [];
   const candidateRates: number[] = [];
   const ratios: number[] = [];
-  warm(benchCase.baseline, Math.min(200, budget));
-  warm(benchCase.candidate, Math.min(200, budget));
+  const batchSize = benchCase.name.startsWith("scale.bare") ? 16 : 1024;
+  warm(benchCase.baseline, Math.min(200, budget), batchSize);
+  warm(benchCase.candidate, Math.min(200, budget), batchSize);
   for (let round = 0; round < rounds; round++) {
     let baselineRate: number;
     let candidateRate: number;
     if ((round & 1) === 0) {
-      baselineRate = runFor(benchCase.baseline, budget);
-      candidateRate = runFor(benchCase.candidate, budget);
+      baselineRate = runFor(benchCase.baseline, budget, batchSize);
+      candidateRate = runFor(benchCase.candidate, budget, batchSize);
     } else {
-      candidateRate = runFor(benchCase.candidate, budget);
-      baselineRate = runFor(benchCase.baseline, budget);
+      candidateRate = runFor(benchCase.candidate, budget, batchSize);
+      baselineRate = runFor(benchCase.baseline, budget, batchSize);
     }
     baselineRates.push(baselineRate);
     candidateRates.push(candidateRate);

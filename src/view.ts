@@ -11,6 +11,7 @@ import {
 } from "./internal.js";
 import {
   compareDecodedValueRange,
+  compareQueryValueRange,
   hasQueryParamDecodedFallback,
   keyIsAmbiguous,
   queryHasEncoding,
@@ -22,6 +23,9 @@ import type { UrlView as UrlViewType } from "./view-types.js";
 interface QueryEncodingCache {
   _queryEncoding?: boolean;
 }
+
+// Query walkers retain the next '=' across bare fields instead of searching
+// the same suffix repeatedly. -2 means unsearched, -1 means no further '='.
 
 function hasCachedQueryEncoding(
   owner: object,
@@ -36,40 +40,6 @@ function hasCachedQueryEncoding(
     cache._queryEncoding = hasEncoding;
   }
   return hasEncoding;
-}
-
-function queryParamAfterBareField(
-  raw: string,
-  start: number,
-  end: number,
-  key: string,
-  keyLen: number,
-  nextEq: number
-): string | null {
-  let i = start;
-  while (i < end) {
-    let amp = raw.indexOf("&", i);
-    if (amp === -1 || amp > end) {
-      amp = end;
-    }
-    const keyEnd = nextEq === -1 || nextEq > amp ? amp : nextEq;
-    if (
-      keyEnd - i === keyLen &&
-      (keyLen !== 0 || nextEq === i) &&
-      raw.startsWith(key, i) &&
-      compareDecodedValueRange(raw, i, keyEnd, key)
-    ) {
-      return nextEq === -1 || nextEq > amp
-        ? ""
-        : decodeRange(raw, nextEq + 1, amp);
-    }
-    const next = amp + 1;
-    if (nextEq !== -1 && nextEq < amp) {
-      nextEq = next < end ? raw.indexOf("=", next) : -1;
-    }
-    i = next;
-  }
-  return null;
 }
 
 function parseViewPort(raw: string, start: number, end: number): number {
@@ -102,15 +72,16 @@ function parseViewPort(raw: string, start: number, end: number): number {
  *   v.fragment();      // → "frag"
  */
 class UrlView implements UrlViewType {
-  private readonly _raw: string;
-  private readonly _queryEnd: number;
-  private readonly _schemeEnd: number;
-  private readonly _hostStart: number;
-  private readonly _hostEnd: number;
-  private readonly _portColon: number;
-  private readonly _authEnd: number;
-  private readonly _queryStart: number;
-  private readonly _fragStart: number;
+  // Erase declarations: the constructor initializes every slot exactly once.
+  // _queryEnd is also the fragment boundary, so no separate fragment slot is needed.
+  private declare readonly _raw: string;
+  private declare readonly _queryEnd: number;
+  private declare readonly _schemeEnd: number;
+  private declare readonly _hostStart: number;
+  private declare readonly _hostEnd: number;
+  private declare readonly _portColon: number;
+  private declare readonly _authEnd: number;
+  private declare readonly _queryStart: number;
 
   // fallow-ignore-next-line complexity
   constructor(rawUrl: string) {
@@ -192,7 +163,6 @@ class UrlView implements UrlViewType {
     this._portColon = portColon;
     this._authEnd = authEnd;
     this._queryStart = queryStart;
-    this._fragStart = fragStart;
   }
 
   /** Returns the raw URL string (the input passed to `view()`). */
@@ -283,9 +253,9 @@ class UrlView implements UrlViewType {
 
   /** Returns the fragment without the leading `#`, or `""` if absent. */
   fragment(): string {
-    return this._fragStart === -1
-      ? ""
-      : this._raw.substring(this._fragStart + 1);
+    const raw = this._raw;
+    const end = this._queryEnd;
+    return end === raw.length ? "" : raw.substring(end + 1);
   }
 
   /**
@@ -330,12 +300,15 @@ class UrlView implements UrlViewType {
 
     // Ambiguous user key: verify each byte-equal hit with the WHATWG walker.
     let i = queryStart;
+    let eq = -2;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
         amp = end;
       }
-      const eq = raw.indexOf("=", i);
+      if (eq !== -1 && eq < i) {
+        eq = raw.indexOf("=", i);
+      }
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
         keyEnd - i === keyLen &&
@@ -348,15 +321,7 @@ class UrlView implements UrlViewType {
         }
         return decodeRange(raw, eq + 1, amp);
       }
-      const next = amp + 1;
-      if ((eq === -1 || eq > amp) && next < end) {
-        const value = queryParamAfterBareField(raw, next, end, key, keyLen, eq);
-        if (value !== null) {
-          return value;
-        }
-        break;
-      }
-      i = next;
+      i = amp + 1;
     }
     const cache = this as unknown as QueryEncodingCache;
     let hasEncoding = cache._queryEncoding;
@@ -456,12 +421,15 @@ class UrlView implements UrlViewType {
     // Pass 1: byte-strict, with verification for ambiguous keys.
     let remaining = n;
     let i = this._queryStart + 1;
+    let eq = -2;
     while (i < end && remaining > 0) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
         amp = end;
       }
-      const eq = raw.indexOf("=", i);
+      if (eq !== -1 && eq < i) {
+        eq = raw.indexOf("=", i);
+      }
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       const fieldPacked =
         keyEnd === i
@@ -499,15 +467,18 @@ class UrlView implements UrlViewType {
       hasCachedQueryEncoding(this, raw, this._queryStart + 1, end)
     ) {
       let j = this._queryStart + 1;
+      let fallbackEq = -2;
       while (j < end && remaining > 0) {
         let amp = raw.indexOf("&", j);
         if (amp === -1 || amp > end) {
           amp = end;
         }
-        const eq = raw.indexOf("=", j);
-        const keyEnd = eq === -1 || eq > amp ? amp : eq;
+        if (fallbackEq !== -1 && fallbackEq < j) {
+          fallbackEq = raw.indexOf("=", j);
+        }
+        const keyEnd = fallbackEq === -1 || fallbackEq > amp ? amp : fallbackEq;
         const fieldLen = keyEnd - j;
-        if (fieldLen === 0 && eq !== j) {
+        if (fieldLen === 0 && fallbackEq !== j) {
           j = amp + 1;
           continue;
         }
@@ -520,7 +491,9 @@ class UrlView implements UrlViewType {
           }
           if (compareDecodedValueRange(raw, j, keyEnd, keys[k])) {
             (out as Record<string, string | null>)[keys[k]] =
-              eq === -1 || eq > amp ? "" : decodeRange(raw, eq + 1, amp);
+              fallbackEq === -1 || fallbackEq > amp
+                ? ""
+                : decodeRange(raw, fallbackEq + 1, amp);
             keyPacked[k] = -1;
             remaining--;
           }
@@ -554,12 +527,15 @@ class UrlView implements UrlViewType {
     }
 
     let i = queryStart;
+    let eq = -2;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
         amp = end;
       }
-      const eq = raw.indexOf("=", i);
+      if (eq !== -1 && eq < i) {
+        eq = raw.indexOf("=", i);
+      }
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
         keyEnd - i === keyLen &&
@@ -604,7 +580,9 @@ class UrlView implements UrlViewType {
         if (amp === -1 || amp > end) {
           amp = end;
         }
-        return compareDecodedValueRange(raw, after + 1, amp, expected);
+        return expected.length < 64
+          ? compareDecodedValueRange(raw, after + 1, amp, expected)
+          : compareQueryValueRange(raw, after + 1, amp, expected);
       }
       if (!hasCachedQueryEncoding(this, raw, queryStart, end)) {
         return false;
@@ -620,12 +598,15 @@ class UrlView implements UrlViewType {
     }
 
     let i = queryStart;
+    let eq = -2;
     while (i < end) {
       let amp = raw.indexOf("&", i);
       if (amp === -1 || amp > end) {
         amp = end;
       }
-      const eq = raw.indexOf("=", i);
+      if (eq !== -1 && eq < i) {
+        eq = raw.indexOf("=", i);
+      }
       const keyEnd = eq === -1 || eq > amp ? amp : eq;
       if (
         keyEnd - i === keyLen &&
@@ -634,7 +615,9 @@ class UrlView implements UrlViewType {
         compareDecodedValueRange(raw, i, keyEnd, key)
       ) {
         const valStart = eq === -1 || eq > amp ? amp : eq + 1;
-        return compareDecodedValueRange(raw, valStart, amp, expected);
+        return expected.length < 64
+          ? compareDecodedValueRange(raw, valStart, amp, expected)
+          : compareQueryValueRange(raw, valStart, amp, expected);
       }
       i = amp + 1;
     }

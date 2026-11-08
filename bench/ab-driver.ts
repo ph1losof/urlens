@@ -20,14 +20,26 @@ async function sourceAdapter(source: string): Promise<string> {
     : "originMatches";
   return `
     export {
+      decodeQueryComponent,
+      encodeQueryComponent,
       hasQueryParam,
+      hasScheme,
       queryParamEquals,
       ${originExport} as rawOriginsEqual,
       readPathname,
+      pathnameStartsWith,
+      pathnameEndsWith,
+      readOrigin,
+      readHost,
+      readHostname,
       readPort,
       readQueryParam,
       readQueryParams,
+      removeQueryParams,
+      setQueryParam,
+      setQueryParams,
       setPathname,
+      setPort,
       setScheme,
       view,
     } from ${JSON.stringify(source)};
@@ -101,6 +113,10 @@ async function runOrder(
   invert: boolean
 ): Promise<AbResult[]> {
   const page = await browser.newPage();
+  let scriptError: Error | undefined;
+  page.on("pageerror", (error) => {
+    scriptError = error;
+  });
   try {
     await page.goto("about:blank");
     await page.evaluate(
@@ -121,6 +137,9 @@ async function runOrder(
       }
     );
     await page.addScriptTag({ content: source });
+    if (scriptError) {
+      throw scriptError;
+    }
     return await page.evaluate(
       () =>
         (
@@ -135,11 +154,14 @@ async function runOrder(
 }
 
 function formatRate(value: number): string {
+  if (value < 1_000_000) {
+    return `${(value / 1000).toFixed(2)}K/s`;
+  }
   return `${(value / 1_000_000).toFixed(2)}M/s`;
 }
 
 function pad(value: string, width: number): string {
-  return value.padEnd(width);
+  return `${value.padEnd(width)} `;
 }
 
 for (const engine of engines) {
