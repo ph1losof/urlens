@@ -154,6 +154,30 @@ function decodeMultiByteUtf8(
 // error handling. Invalid bytes emit U+FFFD; a non-continuation byte after an
 // invalid lead is processed again.
 // fallow-ignore-next-line complexity
+export function compareQueryValueRange(
+  s: string,
+  start: number,
+  end: number,
+  expected: string
+): boolean {
+  const expectedLen = expected.length;
+  // Form decoding never increases UTF-16 length. At equal lengths only '+'
+  // can change a matching character; a valid percent escape shortens it.
+  if (expectedLen >= 64 && end - start === expectedLen) {
+    if (s.substring(start, end) !== expected) {
+      if (expected.indexOf(" ") === -1) {
+        return false;
+      }
+    } else if (!queryHasEncoding(expected, 0, expectedLen)) {
+      return true;
+    }
+  }
+  return compareDecodedValueRange(s, start, end, expected);
+}
+
+// Keep the scalar walker separate: key matching and short-value comparisons
+// should not carry the native long-value comparison through their hot loop.
+// fallow-ignore-next-line complexity
 export function compareDecodedValueRange(
   s: string,
   start: number,
@@ -246,12 +270,16 @@ function findDecodedFieldMatch(
   keyLen: number
 ): boolean {
   let i = queryStart;
+  // -2: unsearched; -1: exhausted. Retain a later '=' across bare fields.
+  let eq = -2;
   while (i < end) {
     let amp = raw.indexOf("&", i);
     if (amp === -1 || amp > end) {
       amp = end;
     }
-    const eq = raw.indexOf("=", i);
+    if (eq !== -1 && eq < i) {
+      eq = raw.indexOf("=", i);
+    }
     const keyEnd = eq === -1 || eq > amp ? amp : eq;
     if (
       (keyLen !== 0 || eq === i) &&
@@ -305,5 +333,31 @@ export function queryParamEqualsDecodedFallback(
     return false;
   }
   const valStart = FB_EQ === -1 ? FB_AMP : FB_EQ + 1;
-  return compareDecodedValueRange(raw, valStart, FB_AMP, expected);
+  return expected.length < 64
+    ? compareDecodedValueRange(raw, valStart, FB_AMP, expected)
+    : compareQueryValueRange(raw, valStart, FB_AMP, expected);
+}
+
+// Return the raw end of a matching first key, or -1. Only used for large
+// fragment suffixes; the ordinary readers keep their existing fast paths.
+export function matchFirstQueryKey(
+  raw: string,
+  start: number,
+  end: number,
+  key: string
+): number {
+  const after = start + key.length;
+  if (
+    key.length === 0 ||
+    after > end ||
+    keyIsAmbiguous(key) ||
+    !raw.startsWith(key, start)
+  ) {
+    return -1;
+  }
+  if (after === end) {
+    return after;
+  }
+  const next = raw.charCodeAt(after);
+  return next === CH_AMP || next === CH_EQUALS ? after : -1;
 }

@@ -1,0 +1,20 @@
+$ bun bench/ab-driver.ts
+
+======== WebKit (JavaScriptCore) ========
+budget=60ms rounds=5 per ordering
+case                         baseline      candidate     delta (orders)
+view.retain.port             256.89M/s     217.28M/s     -6.37% (-4.9%, -7.9%)
+flat.pathname                25.37M/s      26.24M/s      +2.61% (4.1%, 1.2%)
+extra.encode.short           79.79M/s      84.20M/s      +3.93% (5.4%, 2.5%)
+extra.encode.shortMixed      52.15M/s      52.05M/s      -0.07% (-0.6%, 0.5%)
+extra.encode.plain           220.04K/s     230.76K/s     +4.87% (0.0%, 10.0%)
+extra.encode.space           244.11K/s     256.00K/s     +4.64% (0.0%, 9.5%)
+extra.encode.utf8            266.42K/s     266.42K/s     +0.00% (0.0%, 0.0%)
+extra.encode.surrogate       268.59K/s     270.82K/s     +0.83% (1.7%, 0.0%)
+extra.encode.dense           93.10K/s      80.69K/s      -16.93% (-18.2%, -15.6%)
+area.path.longTail           6.32M/s       6.39M/s       +1.08% (0.0%, 2.2%)
+area.encode.latin1           411.25K/s     344.03K/s     -18.02% (-20.0%, -16.0%)
+area.encode.cyrillic         276.32K/s     263.88K/s     -4.70% (3.3%, -12.1%)
+area.encode.cjk              160.70K/s     211.30K/s     +21.00% (48.8%, -1.6%)
+area.encode.astral           419.67K/s     419.67K/s     -0.82% (0.0%, -1.6%)
+area.encode.latin1Short      39.30M/s      39.49M/s      +0.43% (1.5%, -0.6%)

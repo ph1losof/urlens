@@ -71,9 +71,8 @@ export function findKeyMatch(
       return start;
     }
   }
-  let pos = start + 1;
-  let match = -1;
-  while (pos < end) {
+  const pos = start + 1;
+  if (pos < end) {
     const idx = rawUrl.indexOf(key, pos);
     if (idx === -1 || idx + keyLen > end) {
       return -1;
@@ -83,16 +82,53 @@ export function findKeyMatch(
       const after = idx + keyLen;
       const next = after === end ? CH_EQ : rawUrl.charCodeAt(after);
       if (next === CH_EQ || next === CH_AMP) {
-        match = idx;
-        pos = end;
-      } else {
-        pos = idx + 1;
+        return idx;
       }
-    } else {
-      pos = idx + 1;
     }
+    return findKeyAfterCollision(rawUrl, idx, end, key);
   }
-  return match;
+  return -1;
+}
+
+// After a substring hit inside a field, jump to the next possible field
+// boundary instead of searching each occurrence in a long value. Cache the
+// question-mark search so queries with many '&' fields stay linear.
+function findKeyAfterCollision(
+  raw: string,
+  start: number,
+  end: number,
+  key: string
+): number {
+  let pos = start;
+  let question = -2;
+  while (pos < end) {
+    let amp = raw.indexOf("&", pos);
+    if (amp === -1 || amp > end) {
+      amp = end;
+    }
+    if (question !== -1 && question < pos) {
+      question = raw.indexOf("?", pos);
+    }
+    const boundary = question !== -1 && question < amp ? question : amp;
+    if (boundary >= end) {
+      return -1;
+    }
+    const idx = raw.indexOf(key, boundary + 1);
+    const after = idx + key.length;
+    if (idx === -1 || after > end) {
+      return -1;
+    }
+    const prev = raw.charCodeAt(idx - 1);
+    const next = after === end ? CH_EQ : raw.charCodeAt(after);
+    if (
+      (prev === CH_AMP || prev === CH_QUESTION) &&
+      (next === CH_EQ || next === CH_AMP)
+    ) {
+      return idx;
+    }
+    pos = idx;
+  }
+  return -1;
 }
 
 // Packing base for authority offsets; longer URLs use length + 1.
@@ -196,4 +232,23 @@ export function parsePortRange(s: string, start: number, end: number): number {
     port = port * 10 + (c - CH_0);
   }
   return port;
+}
+
+// Used only when a large fragment follows the query. Short values can be
+// scanned without allocating a prefix; long values use a bounded native scan.
+export function findQueryFieldEnd(
+  raw: string,
+  start: number,
+  end: number
+): number {
+  if (end - start >= 64) {
+    const offset = raw.substring(start, end).indexOf("&");
+    return offset === -1 ? end : start + offset;
+  }
+  for (let i = start; i < end; i++) {
+    if (raw.charCodeAt(i) === CH_AMP) {
+      return i;
+    }
+  }
+  return end;
 }
